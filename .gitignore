@@ -1,0 +1,30 @@
+# Maven
+target/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Local assistant/tool state
+.claude/
+.codex-doc-cache/
+.agents/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.p12
+*.jks
+*.local.properties
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+*.log
