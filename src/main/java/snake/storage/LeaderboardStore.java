@@ -27,7 +27,7 @@ public class LeaderboardStore {
     private static final int PORT = envInt("SNAKE_DB_PORT", 3306);
     private static final String DATABASE = env("SNAKE_DB_NAME", "snake_game");
     private static final String USER = env("SNAKE_DB_USER", "root");
-    private static final String PASSWORD = env("SNAKE_DB_PASSWORD", "");
+    private static final String PASSWORD = env("SNAKE_DB_PASSWORD", "1234");
 
     private static final String SETUP_URL =
             "jdbc:mysql://" + HOST + ":" + PORT + "/?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true";
