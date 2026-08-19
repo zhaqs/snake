@@ -140,6 +140,16 @@ public final class SnakeGame implements PositionProvider {
     // 游戏循环
     // ===================================================================
 
+    /**
+     * 游戏主循环，由 {@link #gameTimer} 每 {@code FRAME_DELAY_MS}（16ms）调用一次。
+     * <p>流程：
+     * <ol>
+     *   <li>修剪过期特效、刷新道具生成</li>
+     *   <li>计算自上次移动以来经过的时间，更新移动进度（用于插值动画）</li>
+     *   <li>若未达到移动间隔，只刷新视图（蛇身平滑滑动）</li>
+     *   <li>若达到间隔，执行一次移动（{@link #moveOneCell}），溢出时间回滚至下一帧</li>
+     * </ol>
+     */
     void tick(double now) {
         if (!state.running || state.paused || state.gameOver) return;
 
@@ -155,28 +165,42 @@ public final class SnakeGame implements PositionProvider {
             return;
         }
 
-        // 溢出处理
+        // 溢出处理：超过移动间隔的部分回滚到 lastMoveAt，下一帧继续累积
         state.lastMoveAt = now - Math.max(0, elapsed - interval);
         state.moveProgress = 0.0;
         moveOneCell(now);
         updateView(now);
     }
 
+    /**
+     * 执行一次完整的"移动一格"操作，顺序与 Python 版一致：
+     * <ol>
+     *   <li>计算下一个蛇头位置（当前方向）</li>
+     *   <li>撞墙 → 游戏结束（wall 死亡）</li>
+     *   <li>无敌时撞障碍 → 撞碎障碍（不结束）</li>
+     *   <li>撞自身或障碍且非无敌 → 游戏结束</li>
+     *   <li>蛇头插入新位置（头部前进）</li>
+     *   <li>吃到食物 → 计分 + 不删尾（蛇变长）；没吃到 → 删尾（保持长度）</li>
+     *   <li>拾取道具 → 激活效果</li>
+     *   <li>磁铁激活 → 吸引附近食物/道具，若自动拾取则额外加长</li>
+     *   <li>应用方向队列中的下一个方向</li>
+     * </ol>
+     */
     private void moveOneCell(double now) {
         Point nextHead = state.snake.get(0).moved(state.direction);
 
-        // 撞墙
+        // 1. 撞墙检测
         if (!SnakeRules.pointInBounds(nextHead, GRID_WIDTH, GRID_HEIGHT)) {
             endGame(now, true);
             return;
         }
 
-        // 无敌时撞碎障碍物
+        // 2. 无敌时撞碎障碍物
         if (state.obstacles.contains(nextHead) && state.invincibleActive(now)) {
             destroyObstacle(nextHead, now);
         }
 
-        // 碰撞检测
+        // 3. 碰撞检测（撞自身或撞障碍，且非无敌）
         boolean hitsSelf = state.snake.subList(0, Math.max(0, state.snake.size() - 1)).contains(nextHead);
         boolean hitsObstacle = state.obstacles.contains(nextHead);
         if (SnakeRules.collisionIsFatal(hitsSelf, hitsObstacle, state.invincibleActive(now))) {
@@ -186,15 +210,16 @@ public final class SnakeGame implements PositionProvider {
             return;
         }
 
-        // 拾取道具
+        // 4. 拾取道具
         PowerUpKind picked = null;
         if (state.powerUp != null && nextHead.equals(state.powerUp.position())) {
             picked = state.powerUp.kind();
         }
 
+        // 5. 蛇头前进
         state.snake.add(0, nextHead);
 
-        // 吃食物
+        // 6. 吃食物：计分、刷新食物位置；没吃到则删尾
         boolean ate = nextHead.equals(state.food);
         Point removedTail = null;
         if (ate) {
@@ -205,13 +230,13 @@ public final class SnakeGame implements PositionProvider {
             removedTail = state.snake.remove(state.snake.size() - 1);
         }
 
-        // 激活道具
+        // 7. 激活道具效果
         if (picked != null) {
             state.activateEffect(picked, now, POWER_UP_DURATION_SECONDS);
             state.powerUp = null;
         }
 
-        // 磁铁吸引力
+        // 8. 磁铁吸引力：将食物/道具拉向蛇头，若自动拾取则额外加长蛇身
         if (state.magnetActive(now)) {
             boolean collected = attractObjects(!ate);
             if (collected) {
@@ -222,7 +247,7 @@ public final class SnakeGame implements PositionProvider {
             }
         }
 
-        // 应用队列中的方向
+        // 9. 应用方向队列中的下一个方向
         if (!state.turnQueue.isEmpty()) {
             state.direction = state.turnQueue.removeFirst();
         }
@@ -258,6 +283,16 @@ public final class SnakeGame implements PositionProvider {
         updateView(now);
     }
 
+    /**
+     * 处理方向队列逻辑，对应 Python 的 {@code queue_direction} 和 {@code _enqueue_turn}。
+     * <p>规则：
+     * <ul>
+     *   <li>游戏未开始时，设置方向并立即开始</li>
+     *   <li>队列为空时，检查是否可「立即转弯」（移动进度 ≤ 20%），否则入队</li>
+     *   <li>队列非空时，检查是否与队尾反向，若是则修正队尾而非追加（支持快速掉头修正）</li>
+     *   <li>队列满时（{@code TURN_QUEUE_LIMIT=3}），替换队尾而非追加</li>
+     * </ul>
+     */
     void queueDirection(Point requested) {
         if (requested == null || state.gameOver) return;
 
@@ -398,6 +433,7 @@ public final class SnakeGame implements PositionProvider {
     // 分数 / 等级 / 障碍物
     // ===================================================================
 
+    /** 增加 1 分，若超过历史最高分则同步写入 MySQL。 */
     private void addScore(double now) {
         state.score++;
         if (state.score > state.highScore) {
@@ -407,6 +443,7 @@ public final class SnakeGame implements PositionProvider {
         updateLevel(now);
     }
 
+    /** 每 5 分升一级：加快速度、增加障碍物、显示等级提示。 */
     private void updateLevel(double now) {
         int newLevel = state.score / LEVEL_SCORE_STEP + 1;
         if (newLevel <= state.level) return;
@@ -415,6 +452,7 @@ public final class SnakeGame implements PositionProvider {
         growObstacles();
     }
 
+    /** 在当前等级应生成的障碍物数量与已存在数量之间补齐，不超过 {@code MAX_OBSTACLES}。 */
     private void growObstacles() {
         int target = Math.min(MAX_OBSTACLES, (state.level - 1) * OBSTACLES_PER_LEVEL);
         while (state.obstacles.size() < target) {
@@ -448,6 +486,11 @@ public final class SnakeGame implements PositionProvider {
     // 磁铁
     // ===================================================================
 
+    /**
+     * 磁铁吸引：将食物和道具向蛇头方向拉近 {@code MAGNET_PULL_STEPS} 步。
+     * 若 {@code mayCollect} 为真且食物已被拉到自动拾取半径内，返回 true（触发额外加长）。
+     * 对应 Python 的 {@code attract_objects}。
+     */
     private boolean attractObjects(boolean mayCollect) {
         Point head = state.snake.get(0);
 
@@ -472,12 +515,18 @@ public final class SnakeGame implements PositionProvider {
         return collected;
     }
 
+    /**
+     * 将一个点向目标方向拉近一步。优先沿距离较大的轴移动（如 x 差≥y 差则先 x 后 y），
+     * 若目标格被阻挡则尝试另一轴，两步都不可行则停止。
+     * 对应 Python 的 {@code attracted_position}。
+     */
     private Point pullToward(Point from, Point target, Set<Point> blocked) {
         Point current = from;
         for (int step = 0; step < MAGNET_PULL_STEPS
                 && SnakeRules.manhattanDistance(current, target) <= MAGNET_RADIUS; step++) {
             int dx = Integer.compare(target.x(), current.x());
             int dy = Integer.compare(target.y(), current.y());
+            // 优先沿距离大的轴移动
             Point[] orderedSteps = Math.abs(target.x() - current.x()) >= Math.abs(target.y() - current.y())
                     ? new Point[]{new Point(dx, 0), new Point(0, dy)}
                     : new Point[]{new Point(0, dy), new Point(dx, 0)};
@@ -514,6 +563,16 @@ public final class SnakeGame implements PositionProvider {
     // 游戏结束
     // ===================================================================
 
+    /**
+     * 游戏结束流程：
+     * <ol>
+     *   <li>播放死亡音效、停止游戏主计时器</li>
+     *   <li>设置死亡状态参数（用于死亡动画渲染）</li>
+     *   <li>将本局成绩写入 MySQL 排行榜（保留历史最好成绩）</li>
+     *   <li>启动死亡动画计时器：每 16ms 刷新视图，显示能量圈扩散 + X 眼，持续 {@code DEATH_ANIMATION_SECONDS} 后自动停止</li>
+     *   <li>立即刷新一次视图显示第一帧死亡动画</li>
+     * </ol>
+     */
     private void endGame(double now, boolean wall) {
         AudioBeep.playSound("death", Toolkit.getDefaultToolkit()::beep);
         gameTimer.stop();
@@ -527,7 +586,7 @@ public final class SnakeGame implements PositionProvider {
 
         store.updateRecord(playerName, state.score, state.snake.size());
 
-        // 死亡动画计时器
+        // 死亡动画计时器：在死亡持续期间逐帧刷新视图
         if (deathTimer != null) deathTimer.stop();
         deathTimer = new javax.swing.Timer(FRAME_DELAY_MS, e -> {
             double n = now();
@@ -552,6 +611,12 @@ public final class SnakeGame implements PositionProvider {
         state.moveProgress = Math.min(1.0, Math.max(0.0, elapsed / moveIntervalMs()));
     }
 
+    /**
+     * 计算当前移动间隔（毫秒）。
+     * <p>基础间隔 = {@code START_MOVE_INTERVAL_MS} - 额外段数×3 - 等级×7，
+     * 下限 {@code MIN_MOVE_INTERVAL_MS}。加速时除 2（取整，下限 1）。
+     * 对应 Python 的 {@code move_interval_ms}。
+     */
     int moveIntervalMs() {
         int extra = Math.max(0, state.snake.size() - START_LENGTH);
         int levelBonus = Math.max(0, state.level - 1) * LEVEL_SPEEDUP_MS;
@@ -560,6 +625,10 @@ public final class SnakeGame implements PositionProvider {
         return state.boosting ? Math.max(1, base / BOOST_MULTIPLIER) : base;
     }
 
+    /**
+     * 在网格中随机选一个未被阻挡的单元格。从随机起点开始线性扫描以保证均匀分布。
+     * 若全被阻挡则返回 null。对应 Python 的 {@code random_free_cell}。
+     */
     Point randomFreeCell(Set<Point> blocked) {
         int total = GRID_WIDTH * GRID_HEIGHT;
         int start = random.nextInt(total);

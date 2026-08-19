@@ -317,8 +317,8 @@ public class SnakeRenderer {
 
         int connectorWidth = CELL_SIZE - 8 + thicknessBonus * 2;
         int bodyInset = Math.max(1, 4 - thicknessBonus);
-        int headInset = Math.max(1, 4 - thicknessBonus);
-        int eyeBonus = thicknessBonus;
+        // 已删除未使用的变量 headInset
+        // 已删除未使用的变量 eyeBonus
 
         // 连接线（从后到前）
         for (int i = n - 1; i > 0; i--) {
@@ -405,6 +405,7 @@ public class SnakeRenderer {
         g.fill(tailShape);
     }
 
+    /** 绘制蛇头部的多边形 + 眼睛 + 鼻孔 + 舌头。方向向量 (dx, dy) 决定头部朝向。 */
     private void drawHead(Graphics2D g, GameState state, double[] cell,
                           Color color, Color outlineColor, int thicknessBonus) {
         double cx = cellCenter(cell[0], cell[1])[0];
@@ -664,6 +665,7 @@ public class SnakeRenderer {
     // 工具方法
     // =========================================================================
 
+    /** 在画布水平居中位置绘制文字，yOffset 为相对于画布顶部的偏移。 */
     private void drawCenteredText(Graphics2D g, String text, Color color, int fontSize, int yOffset) {
         g.setFont(new Font("SansSerif", Font.BOLD, fontSize));
         g.setColor(color);
@@ -671,16 +673,22 @@ public class SnakeRenderer {
         g.drawString(text, (width - fm.stringWidth(text)) / 2, yOffset + fm.getAscent());
     }
 
+    /** 返回网格单元格中心点的像素坐标。 */
     private double[] cellCenter(double cellX, double cellY) {
         return new double[]{(cellX + 0.5) * CELL_SIZE, (cellY + 0.5) * CELL_SIZE};
     }
 
+    /**
+     * 隧道展开：当两个像素坐标跨越画布边界时，将其中一个平移一个画布宽度/高度，
+     * 使连接线正确显示而非横跨整个画布。对应 Python {@code _unwrap_pixel_near}。
+     */
     private double unwrapNear(double value, double reference, double size) {
         if (value - reference > size / 2) return value - size;
         if (value - reference < -size / 2) return value + size;
         return value;
     }
 
+    /** 计算道具效果从开始到现在的进度 [0, 1]，用于无敌时的加粗动画。 */
     private double effectProgress(double startedAt, double until, double now) {
         if (startedAt <= 0 || until <= startedAt) return 1.0;
         return Math.min(1.0, Math.max(0.0, (now - startedAt) / POWER_UP_DURATION_SECONDS));
