@@ -691,7 +691,7 @@ public final class SnakeGame implements PositionProvider {
             double now = now();
             List<LeaderboardStore.Entry> leaders = (state.gameOver || (!state.running && !state.paused))
                     ? store.topByLength(5) : List.of();
-            renderer.draw(g, state, now, SnakeGame.this, leaders);
+            renderer.draw(g, state, now, SnakeGame.this, playerName, leaders);
             g.dispose();
         }
     }

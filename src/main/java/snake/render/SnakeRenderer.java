@@ -46,10 +46,11 @@ public class SnakeRenderer {
      * @param state  游戏状态
      * @param now    当前单调时钟（秒）
      * @param pos    插值位置提供者
+     * @param playerName 当前玩家昵称（用于排行榜高亮）
      * @param leaders 排行榜列表（仅在 overlay 使用）
      */
     public void draw(Graphics2D g, GameState state, double now,
-                     PositionProvider pos, List<LeaderboardStore.Entry> leaders) {
+                     PositionProvider pos, String playerName, List<LeaderboardStore.Entry> leaders) {
         drawGrid(g);
         if (state.magnetActive(now)) {
             drawMagnetRange(g, pos, now);
@@ -67,7 +68,7 @@ public class SnakeRenderer {
         drawDeathAnimation(g, state, now);
         drawLevelNotice(g, state, now);
         if (!state.running || state.paused || state.gameOver) {
-            drawOverlay(g, state, leaders);
+            drawOverlay(g, state, playerName, leaders);
         }
     }
 
@@ -561,7 +562,7 @@ public class SnakeRenderer {
     // 覆盖层（暂停 / 欢迎 / 游戏结束 + 排行榜）
     // =========================================================================
 
-    private void drawOverlay(Graphics2D g, GameState state, List<LeaderboardStore.Entry> leaders) {
+    private void drawOverlay(Graphics2D g, GameState state, String playerName, List<LeaderboardStore.Entry> leaders) {
         // 半透明遮罩
         g.setColor(new Color(0, 0, 0, 165));
         g.fillRect(0, 0, width, height);
@@ -582,8 +583,8 @@ public class SnakeRenderer {
         drawCenteredText(g, message, theme.text, 26, height / 2 - 20);
         drawCenteredText(g, hint, theme.mutedText, 12, height / 2 + 18);
 
-        // 排行榜（仅在欢迎界面显示）
-        if (!state.running && !state.paused && !state.gameOver) {
+        // 排行榜（欢迎页 + 游戏结束页都显示）
+        if (!state.running && !state.paused) {
             int startY = height / 2 + 62;
             g.setFont(new Font("SansSerif", Font.BOLD, 13));
             g.setColor(theme.levelNotice);
@@ -598,11 +599,38 @@ public class SnakeRenderer {
                 fm = g.getFontMetrics();
                 g.drawString(empty, (width - fm.stringWidth(empty)) / 2, startY + 25);
             } else {
+                // 找出当前玩家是否在 top 5 中
+                boolean currentInTop5 = false;
                 for (int i = 0; i < Math.min(leaders.size(), 5); i++) {
-                    LeaderboardStore.Entry entry = leaders.get(i);
-                    String line = (i + 1) + ". " + entry.name() + "  长度 " + entry.bestLength()
+                    if (leaders.get(i).name().equals(playerName)) {
+                        currentInTop5 = true;
+                        break;
+                    }
+                }
+
+                // 合并列表：top 5 + 当前玩家（若不在 top 5 中）
+                List<LeaderboardStore.Entry> displayList = new java.util.ArrayList<>();
+                for (int i = 0; i < Math.min(leaders.size(), 5); i++) {
+                    displayList.add(leaders.get(i));
+                }
+                if (!currentInTop5 && playerName != null && !playerName.isEmpty()) {
+                    // 查找当前玩家的记录
+                    for (LeaderboardStore.Entry e : leaders) {
+                        if (e.name().equals(playerName)) {
+                            displayList.add(e);
+                            break;
+                        }
+                    }
+                }
+
+                for (int i = 0; i < displayList.size(); i++) {
+                    LeaderboardStore.Entry entry = displayList.get(i);
+                    String prefix = (i < 5 ? (i + 1) : "-") + ". ";
+                    String line = prefix + entry.name() + "  长度 " + entry.bestLength()
                             + "  分数 " + entry.bestScore();
-                    g.setFont(new Font("SansSerif", Font.PLAIN, 10));
+                    boolean isCurrent = entry.name().equals(playerName);
+                    g.setFont(new Font("SansSerif", isCurrent ? Font.BOLD : Font.PLAIN, 11));
+                    g.setColor(isCurrent ? theme.text : theme.mutedText);
                     fm = g.getFontMetrics();
                     g.drawString(line, (width - fm.stringWidth(line)) / 2, startY + 23 * (i + 1));
                 }
