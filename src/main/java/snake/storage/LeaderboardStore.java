@@ -213,6 +213,31 @@ public class LeaderboardStore {
     }
 
     /**
+     * 获取某玩家的个人纪录，不存在则返回 null。
+     */
+    public Entry getRecord(String rawName) {
+        String name = normalizePlayerName(rawName);
+        if (name.isEmpty()) return null;
+        if (memoryFallback) {
+            return memory.get(name);
+        }
+        String sql = "SELECT player_name, best_score, best_length FROM leaderboard WHERE player_name = ?";
+        try (Connection conn = openConn(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return new Entry(rs.getString("player_name"),
+                            Math.max(0, rs.getInt("best_score")),
+                            Math.max(0, rs.getInt("best_length")));
+                }
+            }
+        } catch (SQLException e) {
+            System.err.println("[LeaderboardStore] 读取玩家纪录失败：" + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * 规范化玩家昵称：去掉首尾空白、折叠内部连续空白、截断到 20 字符。
      * 对应 Python {@code normalize_player_name}。
      */

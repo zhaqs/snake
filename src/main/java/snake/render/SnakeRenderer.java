@@ -50,7 +50,9 @@ public class SnakeRenderer {
      * @param leaders 排行榜列表（仅在 overlay 使用）
      */
     public void draw(Graphics2D g, GameState state, double now,
-                     PositionProvider pos, String playerName, List<LeaderboardStore.Entry> leaders) {
+                     PositionProvider pos, String playerName,
+                     List<LeaderboardStore.Entry> leaders,
+                     LeaderboardStore.Entry currentPlayerEntry) {
         drawGrid(g);
         if (state.magnetActive(now)) {
             drawMagnetRange(g, pos, now);
@@ -68,7 +70,7 @@ public class SnakeRenderer {
         drawDeathAnimation(g, state, now);
         drawLevelNotice(g, state, now);
         if (!state.running || state.paused || state.gameOver) {
-            drawOverlay(g, state, playerName, leaders);
+            drawOverlay(g, state, playerName, leaders, currentPlayerEntry);
         }
     }
 
@@ -562,7 +564,9 @@ public class SnakeRenderer {
     // 覆盖层（暂停 / 欢迎 / 游戏结束 + 排行榜）
     // =========================================================================
 
-    private void drawOverlay(Graphics2D g, GameState state, String playerName, List<LeaderboardStore.Entry> leaders) {
+    private void drawOverlay(Graphics2D g, GameState state, String playerName,
+                             List<LeaderboardStore.Entry> leaders,
+                             LeaderboardStore.Entry currentPlayerEntry) {
         // 半透明遮罩
         g.setColor(new Color(0, 0, 0, 165));
         g.fillRect(0, 0, width, height);
@@ -593,13 +597,18 @@ public class SnakeRenderer {
             g.drawString(title, (width - fm.stringWidth(title)) / 2, startY);
 
             if (leaders == null || leaders.isEmpty()) {
-                g.setFont(new Font("SansSerif", Font.PLAIN, 10));
-                g.setColor(theme.mutedText);
-                String empty = "暂无纪录，开始第一局吧！";
-                fm = g.getFontMetrics();
-                g.drawString(empty, (width - fm.stringWidth(empty)) / 2, startY + 25);
+                // 无纪录时仍显示当前玩家
+                if (currentPlayerEntry != null) {
+                    showSingleEntry(g, startY, 1, currentPlayerEntry, playerName, true);
+                } else {
+                    g.setFont(new Font("SansSerif", Font.PLAIN, 10));
+                    g.setColor(theme.mutedText);
+                    String empty = "暂无纪录，开始第一局吧！";
+                    fm = g.getFontMetrics();
+                    g.drawString(empty, (width - fm.stringWidth(empty)) / 2, startY + 25);
+                }
             } else {
-                // 找出当前玩家是否在 top 5 中
+                // 判断当前玩家是否在 top 5 中
                 boolean currentInTop5 = false;
                 for (int i = 0; i < Math.min(leaders.size(), 5); i++) {
                     if (leaders.get(i).name().equals(playerName)) {
@@ -608,34 +617,47 @@ public class SnakeRenderer {
                     }
                 }
 
-                // 合并列表：top 5 + 当前玩家（若不在 top 5 中）
-                List<LeaderboardStore.Entry> displayList = new java.util.ArrayList<>();
-                for (int i = 0; i < Math.min(leaders.size(), 5); i++) {
-                    displayList.add(leaders.get(i));
+                // 显示 top 5
+                int row = 1;
+                for (int i = 0; i < Math.min(leaders.size(), 5); i++, row++) {
+                    LeaderboardStore.Entry entry = leaders.get(i);
+                    boolean isCurrent = entry.name().equals(playerName);
+                    showSingleEntry(g, startY, row, entry, playerName, isCurrent);
                 }
-                if (!currentInTop5 && playerName != null && !playerName.isEmpty()) {
-                    // 查找当前玩家的记录
-                    for (LeaderboardStore.Entry e : leaders) {
-                        if (e.name().equals(playerName)) {
-                            displayList.add(e);
+
+                // 当前玩家不在 top 5 时追加显示
+                if (!currentInTop5 && currentPlayerEntry != null) {
+                    // 检查是否与 top 5 最后一条重复（避免 MySQL 延迟导致重复）
+                    boolean alreadyShown = false;
+                    for (int i = 0; i < Math.min(leaders.size(), 5); i++) {
+                        if (leaders.get(i).name().equals(currentPlayerEntry.name())) {
+                            alreadyShown = true;
                             break;
                         }
                     }
-                }
-
-                for (int i = 0; i < displayList.size(); i++) {
-                    LeaderboardStore.Entry entry = displayList.get(i);
-                    String prefix = (i < 5 ? (i + 1) : "-") + ". ";
-                    String line = prefix + entry.name() + "  长度 " + entry.bestLength()
-                            + "  分数 " + entry.bestScore();
-                    boolean isCurrent = entry.name().equals(playerName);
-                    g.setFont(new Font("SansSerif", isCurrent ? Font.BOLD : Font.PLAIN, 11));
-                    g.setColor(isCurrent ? theme.text : theme.mutedText);
-                    fm = g.getFontMetrics();
-                    g.drawString(line, (width - fm.stringWidth(line)) / 2, startY + 23 * (i + 1));
+                    if (!alreadyShown) {
+                        String prefix = "-. ";
+                        String line = prefix + currentPlayerEntry.name()
+                                + "  长度 " + currentPlayerEntry.bestLength()
+                                + "  分数 " + currentPlayerEntry.bestScore();
+                        g.setFont(new Font("SansSerif", Font.BOLD, 11));
+                        g.setColor(theme.text);
+                        fm = g.getFontMetrics();
+                        g.drawString(line, (width - fm.stringWidth(line)) / 2, startY + 23 * row);
+                    }
                 }
             }
         }
+    }
+
+    private void showSingleEntry(Graphics2D g, int startY, int row,
+                                  LeaderboardStore.Entry entry, String playerName, boolean isCurrent) {
+        String line = row + ". " + entry.name() + "  长度 " + entry.bestLength()
+                + "  分数 " + entry.bestScore();
+        g.setFont(new Font("SansSerif", isCurrent ? Font.BOLD : Font.PLAIN, 11));
+        g.setColor(isCurrent ? theme.text : theme.mutedText);
+        FontMetrics fm = g.getFontMetrics();
+        g.drawString(line, (width - fm.stringWidth(line)) / 2, startY + 23 * row);
     }
 
     // =========================================================================
