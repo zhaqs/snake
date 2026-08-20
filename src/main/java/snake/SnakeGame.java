@@ -34,7 +34,6 @@ import javax.swing.Timer;
 import javax.swing.WindowConstants;
 
 import snake.audio.AudioBeep;
-import snake.input.DirectionInput;
 import snake.model.Point;
 import snake.model.PowerUp;
 import snake.model.PowerUpKind;
@@ -44,7 +43,6 @@ import snake.render.SnakeRenderer;
 import snake.rules.MagnetLogic;
 import snake.rules.Progression;
 import snake.rules.SnakeRules;
-import snake.rules.TurnQueueLogic;
 import snake.state.GameState;
 import snake.storage.LeaderboardStore;
 
@@ -68,7 +66,8 @@ public final class SnakeGame implements PositionProvider {
     private javax.swing.Timer deathTimer;
 
     private String playerName;
-    private boolean spaceDown;
+    /** 四方向键按下状态（两键协同可形成斜向移动）。 */
+    private boolean upDown, downDown, leftDown, rightDown;
 
     /** 排行榜缓存：仅在有资格显示榜单的状态切换时刷新，避免绘制线程访问数据库。 */
     private List<LeaderboardStore.Entry> cachedLeaders = List.of();
@@ -128,16 +127,47 @@ public final class SnakeGame implements PositionProvider {
         JRootPane root = frame.getRootPane();
         bind(root, KeyEvent.VK_ESCAPE, "quit", frame::dispose);
         bind(root, KeyEvent.VK_P, "pause", this::togglePause);
-        for (int code : new int[] {KeyEvent.VK_UP, KeyEvent.VK_DOWN, KeyEvent.VK_LEFT,
-                KeyEvent.VK_RIGHT, KeyEvent.VK_W, KeyEvent.VK_A, KeyEvent.VK_S, KeyEvent.VK_D}) {
-            bind(root, code, "move-" + code, () -> queueDirection(DirectionInput.directionForCode(code)));
-        }
+        // 四方向键：按住移动、松开停止。同时按两个相邻键可斜向移动。
+        bindHold(root, KeyEvent.VK_UP, "dir-up",
+                () -> { upDown = true; maybeStartOnInput(); }, () -> upDown = false);
+        bindHold(root, KeyEvent.VK_W, "dir-up-w",
+                () -> { upDown = true; maybeStartOnInput(); }, () -> upDown = false);
+        bindHold(root, KeyEvent.VK_DOWN, "dir-down",
+                () -> { downDown = true; maybeStartOnInput(); }, () -> downDown = false);
+        bindHold(root, KeyEvent.VK_S, "dir-down-w",
+                () -> { downDown = true; maybeStartOnInput(); }, () -> downDown = false);
+        bindHold(root, KeyEvent.VK_LEFT, "dir-left",
+                () -> { leftDown = true; maybeStartOnInput(); }, () -> leftDown = false);
+        bindHold(root, KeyEvent.VK_A, "dir-left-w",
+                () -> { leftDown = true; maybeStartOnInput(); }, () -> leftDown = false);
+        bindHold(root, KeyEvent.VK_RIGHT, "dir-right",
+                () -> { rightDown = true; maybeStartOnInput(); }, () -> rightDown = false);
+        bindHold(root, KeyEvent.VK_D, "dir-right-w",
+                () -> { rightDown = true; maybeStartOnInput(); }, () -> rightDown = false);
         root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0, false), "space-down");
         root.getActionMap().put("space-down", action(this::spacePressed));
         root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0, true), "space-up");
         root.getActionMap().put("space-up", action(this::spaceReleased));
+    }
+
+    /** 未开局时按任意控制键直接开始。 */
+    private void maybeStartOnInput() {
+        if (!state.running && !state.gameOver && !state.paused) {
+            startRound();
+        }
+    }
+
+    /** 绑定按键的按下/抬起两个阶段。 */
+    private static void bindHold(JRootPane root, int code, String name,
+                                 Runnable onPress, Runnable onRelease) {
+        root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke(code, 0, false), name + "-down");
+        root.getActionMap().put(name + "-down", action(onPress));
+        root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke(code, 0, true), name + "-up");
+        root.getActionMap().put(name + "-up", action(onRelease));
     }
 
     private static void bind(JRootPane root, int code, String name, Runnable task) {
@@ -174,115 +204,164 @@ public final class SnakeGame implements PositionProvider {
 
     /**
      * 游戏主循环，由 {@link #gameTimer} 每 {@code FRAME_DELAY_MS}（16ms）调用一次。
-     * <p>流程：
-     * <ol>
-     *   <li>修剪过期特效、刷新道具生成</li>
-     *   <li>计算自上次移动以来经过的时间，更新移动进度（用于插值动画）</li>
-     *   <li>若未达到移动间隔，只刷新视图（蛇身平滑滑动）</li>
-     *   <li>若达到间隔，执行一次移动（{@link #moveOneCell}），溢出时间回滚至下一帧</li>
-     * </ol>
+     * <p>自由移动版：每帧按真实 dt 前进（转向 → 蛇头位移 → 身体跟随 → 碰撞/拾取）。
      */
     void tick(double now) {
         if (!state.running || state.paused || state.gameOver) return;
 
+        double dt = Math.min(0.05, Math.max(0.0, now - state.lastTickAt));
+        state.lastTickAt = now;
+
+        // 方向向量 = 四方向键合成的归一化向量（支持斜向）；(0,0) 表示停止
+        double vx = (rightDown ? 1 : 0) - (leftDown ? 1 : 0);
+        double vy = (downDown ? 1 : 0) - (upDown ? 1 : 0);
+        double mag = Math.sqrt(vx * vx + vy * vy);
+        if (mag < 1e-6) {
+            state.dirX = 0.0;
+            state.dirY = 0.0;
+        } else {
+            state.dirX = vx / mag;
+            state.dirY = vy / mag;
+        }
+
         pruneEffects(now);
         refreshPowerUp(now);
 
-        double interval = moveIntervalMs() / 1000.0;
-        double elapsed = now - state.lastMoveAt;
-        state.moveProgress = Math.min(1.0, elapsed / interval);
-
-        if (elapsed < interval) {
-            updateView(now);
-            return;
+        if (state.dirX != 0.0 || state.dirY != 0.0) {
+            stepMovement(now, dt);
         }
-
-        // 溢出处理：超过移动间隔的部分回滚到 lastMoveAt，下一帧继续累积
-        state.lastMoveAt = now - Math.max(0, elapsed - interval);
-        state.moveProgress = 0.0;
-        moveOneCell(now);
         updateView(now);
     }
 
     /**
-     * 执行一次完整的"移动一格"操作，顺序与 Python 版一致：
+     * 自由移动一步：
      * <ol>
-     *   <li>计算下一个蛇头位置（当前方向）</li>
+     *   <li>转向：角速度 = 速度 / 最小转弯半径（任何速度下转弯半径恒定）</li>
+     *   <li>蛇头沿航向前进（减速键降速；加速已含在 {@link #moveIntervalMs}）</li>
+     *   <li>身体珠子等距约束跟随</li>
      *   <li>撞墙 → 游戏结束（wall 死亡）</li>
-     *   <li>无敌时撞障碍 → 撞碎障碍（不结束）</li>
-     *   <li>撞自身或障碍且非无敌 → 游戏结束</li>
-     *   <li>蛇头插入新位置（头部前进）</li>
-     *   <li>吃到食物 → 计分 + 不删尾（蛇变长）；没吃到 → 删尾（保持长度）</li>
-     *   <li>拾取道具 → 激活效果</li>
-     *   <li>磁铁激活 → 吸引附近食物/道具，若自动拾取则额外加长</li>
-     *   <li>应用方向队列中的下一个方向</li>
+     *   <li>撞障碍：无敌时撞碎（不结束），否则死亡</li>
+     *   <li>吃食物 → 计分加长；拾道具 → 激活效果（均为像素距离判定）</li>
+     *   <li>磁铁激活 → 节流吸引附近食物/道具，自动拾取则额外加长</li>
+     *   <li>撞自身 → 死亡（无敌豁免）</li>
      * </ol>
      */
-    private void moveOneCell(double now) {
-        Point nextHead = state.snake.get(0).moved(state.direction);
+    private void stepMovement(double now, double dt) {
+        if (dt <= 0 || (state.dirX == 0.0 && state.dirY == 0.0)) return;
+        double speed = speedPxPerSec();
+        double[] head = state.body.get(0);
 
-        // 1. 撞墙检测
-        if (!SnakeRules.pointInBounds(nextHead, GRID_WIDTH, GRID_HEIGHT)) {
+        // 蛇头沿当前方向向量前进（heading 跟随方向，用于渲染朝向）
+        head[0] += state.dirX * speed * dt;
+        head[1] += state.dirY * speed * dt;
+        state.heading = Math.atan2(state.dirY, state.dirX);
+
+        // 3. 身体等距跟随
+        followBody();
+
+        // 4. 撞墙（头中心越过边界线才死，符合"穿过轴线"）
+        if (head[0] < 0 || head[0] > CANVAS_WIDTH
+                || head[1] < 0 || head[1] > CANVAS_HEIGHT) {
             endGame(now, true);
             return;
         }
 
-        // 2. 无敌时撞碎障碍物
-        if (state.obstacles.contains(nextHead) && state.invincibleActive(now)) {
-            destroyObstacle(nextHead, now);
+        Point headCell = new Point((int) (head[0] / CELL_SIZE), (int) (head[1] / CELL_SIZE));
+
+        // 5. 障碍：无敌撞碎，否则死亡
+        if (state.obstacles.contains(headCell)) {
+            if (state.invincibleActive(now)) {
+                destroyObstacle(headCell, now);
+            } else {
+                endGame(now, false);
+                return;
+            }
         }
 
-        // 3. 碰撞检测（撞自身或撞障碍，且非无敌）
-        boolean hitsSelf = state.snake.subList(0, Math.max(0, state.snake.size() - 1)).contains(nextHead);
-        boolean hitsObstacle = state.obstacles.contains(nextHead);
-        if (SnakeRules.collisionIsFatal(hitsSelf, hitsObstacle, state.invincibleActive(now))) {
-            state.moveProgress = 1.0;
-            updateView(now);
-            endGame(now, false);
-            return;
-        }
-
-        // 4. 拾取道具
-        PowerUpKind picked = null;
-        if (state.powerUp != null && nextHead.equals(state.powerUp.position())) {
-            picked = state.powerUp.kind();
-        }
-
-        // 5. 蛇头前进
-        state.snake.add(0, nextHead);
-
-        // 6. 吃食物：计分、刷新食物位置；没吃到则删尾
-        boolean ate = nextHead.equals(state.food);
-        Point removedTail = null;
-        if (ate) {
-            AudioBeep.playSound("eat", Toolkit.getDefaultToolkit()::beep);
-            addScore(now);
-            placeFood();
-        } else {
-            removedTail = state.snake.remove(state.snake.size() - 1);
-        }
-
-        // 7. 激活道具效果
-        if (picked != null) {
-            state.activateEffect(picked, now, POWER_UP_DURATION_SECONDS);
-            state.powerUp = null;
-        }
-
-        // 8. 磁铁吸引力：将食物/道具拉向蛇头，若自动拾取则额外加长蛇身
-        if (state.magnetActive(now)) {
-            boolean collected = attractObjects(!ate);
-            if (collected) {
-                if (removedTail != null) state.snake.add(removedTail);
+        // 6. 吃食物（头心到任一食物格心的像素距离）
+        double pickR2 = FOOD_PICK_RADIUS * FOOD_PICK_RADIUS;
+        for (int i = state.foods.size() - 1; i >= 0; i--) {
+            Point f = state.foods.get(i);
+            double fx = (f.x() + 0.5) * CELL_SIZE;
+            double fy = (f.y() + 0.5) * CELL_SIZE;
+            if (dist2(head[0], head[1], fx, fy) < pickR2) {
+                state.foods.remove(i);
                 AudioBeep.playSound("eat", Toolkit.getDefaultToolkit()::beep);
+                growTail();
                 addScore(now);
                 placeFood();
             }
         }
 
-        // 9. 应用方向队列中的下一个方向
-        if (!state.turnQueue.isEmpty()) {
-            state.direction = state.turnQueue.removeFirst();
+        // 7. 拾取道具
+        if (state.powerUp != null) {
+            double px = (state.powerUp.position().x() + 0.5) * CELL_SIZE;
+            double py = (state.powerUp.position().y() + 0.5) * CELL_SIZE;
+            if (dist2(head[0], head[1], px, py) < FOOD_PICK_RADIUS * FOOD_PICK_RADIUS) {
+                state.activateEffect(state.powerUp.kind(), now, POWER_UP_DURATION_SECONDS);
+                state.powerUp = null;
+            }
         }
+
+        // 8. 磁铁吸引（节流拉格子，复用网格版拉扯逻辑）
+        if (state.magnetActive(now) && now - state.lastMagnetPullAt >= MAGNET_PULL_INTERVAL) {
+            state.lastMagnetPullAt = now;
+            if (attractObjects(headCell)) {
+                AudioBeep.playSound("eat", Toolkit.getDefaultToolkit()::beep);
+                growTail();
+                addScore(now);
+                placeFood();
+            }
+        }
+
+        // 9. 撞自身
+        if (!state.invincibleActive(now) && hitsSelf()) {
+            endGame(now, false);
+        }
+    }
+
+    /** 身体珠子等距约束跟随：每颗珠子移动到与前一颗恰好 {@code BEAD_SPACING} 处。 */
+    private void followBody() {
+        for (int i = 1; i < state.body.size(); i++) {
+            double[] prev = state.body.get(i - 1);
+            double[] cur = state.body.get(i);
+            double dx = cur[0] - prev[0];
+            double dy = cur[1] - prev[1];
+            double d = Math.sqrt(dx * dx + dy * dy);
+            if (d < 1e-6) continue;
+            double k = BEAD_SPACING / d;
+            cur[0] = prev[0] + dx * k;
+            cur[1] = prev[1] + dy * k;
+        }
+    }
+
+    /** 尾部追加一颗珠子（复制当前尾点位置，下一帧自然拉开）。 */
+    private void growTail() {
+        double[] tail = state.body.get(state.body.size() - 1);
+        state.body.add(new double[]{tail[0], tail[1]});
+    }
+
+    /** 头部是否撞到自身（跳过转弯直径内必然贴身的头部珠子）。 */
+    /** 头部是否撞到自身：头心到某颗身体珠心的距离小于 SELF_HIT_RADIUS 才判死（"穿过轴线"才死）。 */
+    private boolean hitsSelf() {
+        double[] head = state.body.get(0);
+        double limit = SELF_HIT_RADIUS;
+        for (int i = SELF_COLLISION_SKIP; i < state.body.size(); i++) {
+            double[] p = state.body.get(i);
+            if (dist2(head[0], head[1], p[0], p[1]) < limit * limit) return true;
+        }
+        return false;
+    }
+
+    private static double dist2(double ax, double ay, double bx, double by) {
+        double dx = ax - bx;
+        double dy = ay - by;
+        return dx * dx + dy * dy;
+    }
+
+    /** 当前速度（像素/秒）：由格节奏换算。 */
+    double speedPxPerSec() {
+        return CELL_SIZE * 1000.0 / moveIntervalMs();
     }
 
     // ===================================================================
@@ -291,10 +370,11 @@ public final class SnakeGame implements PositionProvider {
 
     void resetRound() {
         stopTimers();
-        Point center = new Point(GRID_WIDTH / 2, GRID_HEIGHT / 2);
-        List<Point> body = new ArrayList<>();
+        double cx = CANVAS_WIDTH / 2.0;
+        double cy = CANVAS_HEIGHT / 2.0;
+        List<double[]> body = new ArrayList<>();
         for (int i = 0; i < START_LENGTH; i++) {
-            body.add(new Point(center.x() - i, center.y()));
+            body.add(new double[]{cx - i * BEAD_SPACING, cy});
         }
         state.resetRound(body, now());
         deathTimer = null;
@@ -309,61 +389,13 @@ public final class SnakeGame implements PositionProvider {
         state.running = true;
         state.paused = false;
         state.gameOver = false;
-        state.lastMoveAt = now;
-        state.moveProgress = 0.0;
+        state.lastTickAt = now;
         state.nextPowerUpSpawnAt = now + POWER_UP_SPAWN_INTERVAL_SECONDS;
         gameTimer.start();
         updateView(now);
     }
 
-    /**
-     * 处理方向队列逻辑，对应 Python 的 {@code queue_direction} 和 {@code _enqueue_turn}。
-     * <p>规则：
-     * <ul>
-     *   <li>游戏未开始时，设置方向并立即开始</li>
-     *   <li>队列为空时，检查是否可「立即转弯」（移动进度 ≤ 20%），否则入队</li>
-     *   <li>队列非空时，检查是否与队尾反向，若是则修正队尾而非追加（支持快速掉头修正）</li>
-     *   <li>队列满时（{@code TURN_QUEUE_LIMIT=3}），替换队尾而非追加</li>
-     * </ul>
-     */
-    void queueDirection(Point requested) {
-        if (requested == null || state.gameOver) return;
-
-        if (!state.running) {
-            state.direction = requested;
-            startRound();
-            return;
-        }
-
-        // Python 的 _enqueue_turn 逻辑：先同步移动进度以判断是否可立即转弯
-        boolean immediateAllowed = false;
-        if (state.turnQueue.isEmpty()) {
-            double now = now();
-            syncMoveProgress(now);
-            immediateAllowed = state.running && !state.paused && state.moveProgress <= IMMEDIATE_TURN_PROGRESS_LIMIT;
-        }
-
-        switch (TurnQueueLogic.decide(state.direction, state.turnQueue, requested,
-                immediateAllowed, TURN_QUEUE_LIMIT)) {
-            case IMMEDIATE -> {
-                double now = now();
-                state.direction = requested;
-                state.lastMoveAt = now;
-                state.moveProgress = 0.0;
-                updateView(now);
-            }
-            case REPLACE -> {
-                state.turnQueue.removeLast();
-                state.turnQueue.addLast(requested);
-            }
-            case APPEND -> state.turnQueue.addLast(requested);
-            case IGNORE -> { }
-        }
-    }
-
     private void spacePressed() {
-        if (spaceDown) return;
-        spaceDown = true;
         if (state.gameOver) {
             resetRound();
             startRound();
@@ -371,38 +403,21 @@ public final class SnakeGame implements PositionProvider {
         }
         if (!state.running) {
             startRound();
-            return;
-        }
-        if (state.running && !state.paused && !state.boosting) {
-            setBoosting(true);
         }
     }
 
     private void spaceReleased() {
-        spaceDown = false;
-        if (state.boosting) setBoosting(false);
-    }
-
-    private void setBoosting(boolean boosting) {
-        if (state.boosting == boosting) return;
-        double now = now();
-        syncMoveProgress(now);
-        double progress = state.moveProgress;
-        state.boosting = boosting;
-        state.lastMoveAt = now - progress * moveIntervalMs() / 1000.0;
-        updateView(now);
+        // 已取消加速功能，空格仅用于开始/重开
     }
 
     private void togglePause() {
         if (!state.running || state.gameOver) return;
         double now = now();
         state.paused = !state.paused;
-        setBoosting(false);
         if (state.paused) {
             gameTimer.stop();
         } else {
-            state.lastMoveAt = now;
-            state.moveProgress = 0.0;
+            state.lastTickAt = now;
             gameTimer.start();
         }
         updateView(now);
@@ -419,9 +434,9 @@ public final class SnakeGame implements PositionProvider {
     }
 
     private void spawnPowerUp() {
-        Set<Point> blocked = new HashSet<>(state.snake);
+        Set<Point> blocked = occupiedCells();
         blocked.addAll(state.obstacles);
-        blocked.add(state.food);
+        blocked.addAll(state.foods);
         Point cell = randomFreeCell(blocked);
         state.powerUp = cell == null ? null : new PowerUp(
                 random.nextBoolean() ? PowerUpKind.INVINCIBLE : PowerUpKind.MAGNET, cell);
@@ -432,11 +447,34 @@ public final class SnakeGame implements PositionProvider {
     // ===================================================================
 
     private void placeFood() {
-        Set<Point> blocked = new HashSet<>(state.snake);
+        Set<Point> blocked = occupiedCells();
         blocked.addAll(state.obstacles);
+        blocked.addAll(state.foods);
+        // 墙附近不放食物：屏蔽最外圈一格，食物只在内部区域生成
+        for (int x = 0; x < GRID_WIDTH; x++) {
+            blocked.add(new Point(x, 0));
+            blocked.add(new Point(x, GRID_HEIGHT - 1));
+        }
+        for (int y = 0; y < GRID_HEIGHT; y++) {
+            blocked.add(new Point(0, y));
+            blocked.add(new Point(GRID_WIDTH - 1, y));
+        }
         if (state.powerUp != null) blocked.add(state.powerUp.position());
-        Point cell = randomFreeCell(blocked);
-        if (cell != null) state.food = cell;
+        while (state.foods.size() < FOOD_COUNT) {
+            Point cell = randomFreeCell(blocked);
+            if (cell == null) break;
+            state.foods.add(cell);
+            blocked.add(cell);
+        }
+    }
+
+    /** 蛇身珠子当前覆盖的格子集合（用于布点避让）。 */
+    private Set<Point> occupiedCells() {
+        Set<Point> cells = new HashSet<>();
+        for (double[] p : state.body) {
+            cells.add(new Point((int) (p[0] / CELL_SIZE), (int) (p[1] / CELL_SIZE)));
+        }
+        return cells;
     }
 
     // ===================================================================
@@ -474,14 +512,15 @@ public final class SnakeGame implements PositionProvider {
     }
 
     private Set<Point> obstacleSpawnBlockers() {
-        Set<Point> blocked = new HashSet<>(state.snake);
+        Set<Point> blocked = occupiedCells();
         blocked.addAll(state.obstacles);
-        blocked.add(state.food);
-        Point head = state.snake.get(0);
+        blocked.addAll(state.foods);
+        double[] head = state.body.get(0);
+        Point headCell = new Point((int) (head[0] / CELL_SIZE), (int) (head[1] / CELL_SIZE));
         for (int dy = -OBSTACLE_SAFE_RADIUS; dy <= OBSTACLE_SAFE_RADIUS; dy++) {
             for (int dx = -OBSTACLE_SAFE_RADIUS; dx <= OBSTACLE_SAFE_RADIUS; dx++) {
                 if (Math.abs(dx) + Math.abs(dy) <= OBSTACLE_SAFE_RADIUS) {
-                    Point p = new Point(head.x() + dx, head.y() + dy);
+                    Point p = new Point(headCell.x() + dx, headCell.y() + dy);
                     if (SnakeRules.pointInBounds(p, GRID_WIDTH, GRID_HEIGHT)) {
                         blocked.add(p);
                     }
@@ -501,25 +540,38 @@ public final class SnakeGame implements PositionProvider {
      * 若 {@code mayCollect} 为真且食物已被拉到自动拾取半径内，返回 true（触发额外加长）。
      * 对应 Python 的 {@code attract_objects}。
      */
-    private boolean attractObjects(boolean mayCollect) {
-        Point head = state.snake.get(0);
-
-        // 吸引食物
-        Set<Point> blockedForFood = new HashSet<>(state.snake);
+    private boolean attractObjects(Point headCell) {
+        // 吸引所有食物
+        Set<Point> blockedForFood = occupiedCells();
         blockedForFood.addAll(state.obstacles);
+        blockedForFood.addAll(state.foods);
         if (state.powerUp != null) blockedForFood.add(state.powerUp.position());
-        state.food = MagnetLogic.pullToward(state.food, head, blockedForFood,
-                MAGNET_PULL_STEPS, MAGNET_RADIUS, GRID_WIDTH, GRID_HEIGHT);
+        for (int i = 0; i < state.foods.size(); i++) {
+            Point f = state.foods.get(i);
+            state.foods.set(i, MagnetLogic.pullToward(f, headCell, blockedForFood,
+                    MAGNET_PULL_STEPS, MAGNET_RADIUS, GRID_WIDTH, GRID_HEIGHT));
+        }
 
-        boolean collected = mayCollect
-                && SnakeRules.manhattanDistance(state.food, head) <= MAGNET_AUTO_PICKUP_RADIUS;
+        // 自动拾取：任一食物进入自动拾取半径
+        double[] head = state.body.get(0);
+        double pickR = MAGNET_AUTO_PICKUP_RADIUS * CELL_SIZE;
+        boolean collected = false;
+        for (int i = state.foods.size() - 1; i >= 0; i--) {
+            Point f = state.foods.get(i);
+            double fx = (f.x() + 0.5) * CELL_SIZE;
+            double fy = (f.y() + 0.5) * CELL_SIZE;
+            if (dist2(head[0], head[1], fx, fy) < pickR * pickR) {
+                state.foods.remove(i);
+                collected = true;
+            }
+        }
 
         // 吸引道具
         if (state.powerUp != null) {
-            Set<Point> blockedForPU = new HashSet<>(state.snake);
+            Set<Point> blockedForPU = occupiedCells();
             blockedForPU.addAll(state.obstacles);
-            if (!collected) blockedForPU.add(state.food);
-            Point moved = MagnetLogic.pullToward(state.powerUp.position(), head, blockedForPU,
+            blockedForPU.addAll(state.foods);
+            Point moved = MagnetLogic.pullToward(state.powerUp.position(), headCell, blockedForPU,
                     MAGNET_PULL_STEPS, MAGNET_RADIUS, GRID_WIDTH, GRID_HEIGHT);
             state.powerUp = new PowerUp(state.powerUp.kind(), moved);
         }
@@ -552,7 +604,7 @@ public final class SnakeGame implements PositionProvider {
     private void saveRecordAsync() {
         final String name = playerName;
         final int score = state.score;
-        final int length = state.snake.size();
+        final int length = state.body.size();
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() {
                 store.updateRecord(name, score, length);
@@ -602,10 +654,8 @@ public final class SnakeGame implements PositionProvider {
         gameTimer.stop();
         state.running = false;
         state.gameOver = true;
-        state.moveProgress = 0.0;
         state.deathStartedAt = now;
         state.deathUntil = now + DEATH_ANIMATION_SECONDS;
-        state.deathDirection = state.direction;
         state.deathByWall = wall;
 
         saveRecordAsync();
@@ -629,12 +679,6 @@ public final class SnakeGame implements PositionProvider {
     // 工具
     // ===================================================================
 
-    private void syncMoveProgress(double now) {
-        if (!state.running || state.paused || state.gameOver) return;
-        double elapsed = (now - state.lastMoveAt) * 1000;
-        state.moveProgress = Math.min(1.0, Math.max(0.0, elapsed / moveIntervalMs()));
-    }
-
     /**
      * 计算当前移动间隔（毫秒）。
      * <p>基础间隔 = {@code START_MOVE_INTERVAL_MS} - 额外段数×3 - 等级×7，
@@ -642,11 +686,10 @@ public final class SnakeGame implements PositionProvider {
      * 对应 Python 的 {@code move_interval_ms}。
      */
     int moveIntervalMs() {
-        int extra = Math.max(0, state.snake.size() - START_LENGTH);
+        int extra = Math.max(0, state.body.size() - START_LENGTH);
         int levelBonus = Math.max(0, state.level - 1) * LEVEL_SPEEDUP_MS;
-        int base = Math.max(MIN_MOVE_INTERVAL_MS,
+        return Math.max(MIN_MOVE_INTERVAL_MS,
                 START_MOVE_INTERVAL_MS - extra * SPEEDUP_PER_SEGMENT_MS - levelBonus);
-        return state.boosting ? Math.max(1, base / BOOST_MULTIPLIER) : base;
     }
 
     /**
@@ -676,23 +719,20 @@ public final class SnakeGame implements PositionProvider {
     private void updateView(double now) {
         String name = playerName == null ? "-" : playerName;
         scoreLabel.setText(String.format("玩家: %s   分数: %d   最高: %d   等级: %d   长度: %d",
-                name, state.score, state.highScore, state.level, state.snake.size()));
+                name, state.score, state.highScore, state.level, state.body.size()));
 
         if (state.gameOver) {
             statusLabel.setText("游戏结束 - 空格重新开始");
         } else if (state.paused) {
             statusLabel.setText("已暂停 - P 继续");
-        } else if (state.boosting) {
-            String effects = activeEffectText(now);
-            statusLabel.setText(effects.isEmpty() ? "加速 x2 - 松开空格减速" : "加速 x2 - " + effects);
         } else {
             String effects = activeEffectText(now);
             if (!effects.isEmpty()) {
                 statusLabel.setText(effects);
             } else if (state.running) {
-                statusLabel.setText("方向键 / WASD 移动，按住空格加速");
+                statusLabel.setText("按住方向键移动，松开停止");
             } else {
-                statusLabel.setText("空格开始");
+                statusLabel.setText("空格开始（方向键也可开始）");
             }
         }
 
@@ -716,37 +756,35 @@ public final class SnakeGame implements PositionProvider {
     // ===================================================================
 
     @Override
-    public double[] interpolatedHeadXy() {
-        double[] cell = interpolatedSegmentCell(0);
-        return new double[]{cell[0] * CELL_SIZE, cell[1] * CELL_SIZE};
+    public List<double[]> bodyPoints() {
+        return state.body;
+    }
+
+    @Override
+    public double heading() {
+        return state.heading;
     }
 
     @Override
     public List<Point> magnetTargets() {
         List<Point> targets = new ArrayList<>();
-        if (SnakeRules.manhattanDistance(state.food, state.snake.get(0)) <= MAGNET_RADIUS) {
-            targets.add(state.food);
+        double[] head = state.body.get(0);
+        double r2 = (double) (MAGNET_RADIUS * CELL_SIZE) * (MAGNET_RADIUS * CELL_SIZE);
+        for (Point f : state.foods) {
+            double fx = (f.x() + 0.5) * CELL_SIZE;
+            double fy = (f.y() + 0.5) * CELL_SIZE;
+            if (dist2(head[0], head[1], fx, fy) <= r2) {
+                targets.add(f);
+            }
         }
-        if (state.powerUp != null
-                && SnakeRules.manhattanDistance(state.powerUp.position(), state.snake.get(0)) <= MAGNET_RADIUS) {
-            targets.add(state.powerUp.position());
+        if (state.powerUp != null) {
+            double px = (state.powerUp.position().x() + 0.5) * CELL_SIZE;
+            double py = (state.powerUp.position().y() + 0.5) * CELL_SIZE;
+            if (dist2(head[0], head[1], px, py) <= r2) {
+                targets.add(state.powerUp.position());
+            }
         }
         return targets;
-    }
-
-    @Override
-    public double[] interpolatedSegmentCell(int index) {
-        Point start = state.snake.get(index);
-        Point target;
-        if (index == 0) {
-            target = start.moved(state.direction);
-        } else {
-            target = state.snake.get(index - 1);
-        }
-        double progress = Math.max(0.0, Math.min(1.0, state.moveProgress));
-        double cx = start.x() + (target.x() - start.x()) * progress;
-        double cy = start.y() + (target.y() - start.y()) * progress;
-        return new double[]{cx, cy};
     }
 
     // ===================================================================

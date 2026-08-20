@@ -10,6 +10,7 @@ target/
 .claude/
 .codex-doc-cache/
 .agents/
+.workbuddy/
 
 # Local configuration and secrets
 .env

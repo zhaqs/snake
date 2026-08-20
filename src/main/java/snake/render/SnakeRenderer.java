@@ -7,8 +7,10 @@ import java.awt.Color;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics2D;
+import java.awt.RadialGradientPaint;
 import java.awt.RenderingHints;
 import java.awt.geom.Path2D;
+import java.awt.geom.Point2D;
 import java.util.List;
 
 import snake.constants.GameConfig;
@@ -72,18 +74,19 @@ public class SnakeRenderer {
                      PositionProvider pos, String playerName,
                      List<LeaderboardStore.Entry> leaders,
                      LeaderboardStore.Entry currentPlayerEntry) {
+        drawBackground(g);
         drawGrid(g);
         if (state.magnetActive(now)) {
             drawMagnetRange(g, pos, now);
         }
         drawObstacles(g, state);
         drawWallBreakEffects(g, state, now);
-        drawFood(g, state.food);
+        for (Point f : state.foods) drawFood(g, f);
         drawPowerUp(g, state.powerUp);
         if (state.magnetActive(now)) {
             drawMagnetPullEffects(g, pos, now);
         }
-        if (!state.snake.isEmpty()) {
+        if (!state.body.isEmpty()) {
             drawSnake(g, state, now, pos);
         }
         drawDeathAnimation(g, state, now);
@@ -91,6 +94,22 @@ public class SnakeRenderer {
         if (!state.running || state.paused || state.gameOver) {
             drawOverlay(g, state, playerName, leaders, currentPlayerEntry);
         }
+    }
+
+    // =========================================================================
+    // 背景（霓光夜园：径向渐变深底）
+    // =========================================================================
+
+    private void drawBackground(Graphics2D g) {
+        Point2D center = new Point2D.Double(width / 2.0, height / 2.0);
+        float radius = (float) Math.max(width, height) * 0.75f;
+        RadialGradientPaint bg = new RadialGradientPaint(
+                center, radius,
+                new float[]{0f, 1f},
+                new Color[]{theme.bgGlow, theme.bgDeep});
+        g.setPaint(bg);
+        g.fillRect(0, 0, width, height);
+        g.setPaint(null);
     }
 
     // =========================================================================
@@ -112,11 +131,22 @@ public class SnakeRenderer {
     // =========================================================================
 
     private void drawFood(Graphics2D g, Point food) {
-        g.setColor(theme.food);
-        int pad = 5;
+        int pad = 4;
+        int size = CELL_SIZE - pad * 2;
         int x = food.x() * CELL_SIZE + pad;
         int y = food.y() * CELL_SIZE + pad;
-        g.fillOval(x, y, CELL_SIZE - pad * 2, CELL_SIZE - pad * 2);
+        int cx = x + size / 2;
+        int cy = y + size / 2;
+        // 玻璃果实：亮心 → 暗边 的径向渐变 + 高光点
+        RadialGradientPaint gp = new RadialGradientPaint(
+                new Point2D.Double(cx - size * 0.22, cy - size * 0.24), size * 0.95f,
+                new float[]{0f, 1f},
+                new Color[]{theme.foodLight, theme.food});
+        g.setPaint(gp);
+        g.fillOval(x, y, size, size);
+        g.setPaint(null);
+        g.setColor(new Color(255, 255, 255, 170));
+        g.fillOval((int) (cx - size * 0.28), (int) (cy - size * 0.3), size / 4, size / 4);
     }
 
     // =========================================================================
@@ -219,11 +249,16 @@ public class SnakeRenderer {
     // =========================================================================
 
     private void drawMagnetRange(Graphics2D g, PositionProvider pos, double now) {
-        double[] head = pos.interpolatedHeadXy();
-        int cx = (int) (head[0] + CELL_SIZE / 2.0);
-        int cy = (int) (head[1] + CELL_SIZE / 2.0);
+        double[] head = pos.bodyPoints().get(0);
+        int cx = (int) head[0];
+        int cy = (int) head[1];
         int radius = MAGNET_RADIUS * CELL_SIZE;
         double pulse = (now * 3.5) % 1.0;
+
+        // 外发光晕（霓光）
+        g.setStroke(new BasicStroke(7));
+        g.setColor(withAlpha(theme.magnetRing, 55));
+        g.drawOval(cx - radius - 3, cy - radius - 3, (radius + 3) * 2, (radius + 3) * 2);
 
         g.setStroke(STROKE_2);
         g.setColor(theme.magnetRing);
@@ -241,9 +276,9 @@ public class SnakeRenderer {
     // =========================================================================
 
     private void drawMagnetPullEffects(Graphics2D g, PositionProvider pos, double now) {
-        double[] head = pos.interpolatedHeadXy();
-        int hx = (int) (head[0] + CELL_SIZE / 2.0);
-        int hy = (int) (head[1] + CELL_SIZE / 2.0);
+        double[] head = pos.bodyPoints().get(0);
+        int hx = (int) head[0];
+        int hy = (int) head[1];
 
         for (Point target : pos.magnetTargets()) {
             int tx = target.x() * CELL_SIZE + CELL_SIZE / 2;
@@ -307,59 +342,73 @@ public class SnakeRenderer {
     // =========================================================================
 
     private void drawSnake(Graphics2D g, GameState state, double now, PositionProvider pos) {
-        int n = state.snake.size();
-        double[][] cells = new double[n][];
-        for (int i = 0; i < n; i++) {
-            cells[i] = pos.interpolatedSegmentCell(i);
-        }
+        java.util.List<double[]> pts = pos.bodyPoints();
+        int n = pts.size();
+        if (n == 0) return;
 
-        // 视觉风格选择
         boolean invincible = state.invincibleActive(now);
-        double effectProgress = invincible ? effectProgress(state.invincibleStartedAt, state.invincibleUntil, now) : 0;
-        int thicknessBonus = invincible ? 1 + (int) (effectProgress * 4) : 0;
+        int thicknessBonus = invincible ? 2 : 0;
         double remaining = state.invincibleUntil - now;
         boolean warning = invincible && remaining <= INVINCIBLE_WARNING_SECONDS;
         boolean blink = warning && (int) (now * 10) % 2 == 0;
+        boolean dead = state.deathUntil > now;
+        boolean magnet = state.magnetActive(now) && !invincible;
 
+        // 颜色方案
         Color headColor, bodyColor, outlineColor;
-        if (invincible && !blink) {
+        if (dead) {
+            headColor = theme.snakeDeadBody;
+            bodyColor = theme.snakeDeadBody;
+            outlineColor = theme.snakeDeadOutline;
+        } else if (invincible && !blink) {
             int phase = (int) (now * 13) % theme.invincibleFlash.length;
             headColor = theme.invincibleFlash[phase];
             bodyColor = theme.invincibleFlash[(phase + 2) % theme.invincibleFlash.length];
             outlineColor = theme.invincibleOutline;
+        } else if (magnet) {
+            headColor = theme.magnetPowerUp;
+            bodyColor = theme.magnetPowerUp;
+            outlineColor = theme.magnetRing;
         } else {
             headColor = theme.snakeHead;
-            bodyColor = warning && blink ? theme.invincibleWarningStipple : theme.snakeBody;
-            outlineColor = theme.snakeOutline;
+            bodyColor = theme.snakeBody;
+            outlineColor = theme.snakeOutlineDark;
         }
 
-        int connectorWidth = CELL_SIZE - 8 + thicknessBonus * 2;
-        int bodyInset = Math.max(1, 4 - thicknessBonus);
-        // 已删除未使用的变量 headInset
-        // 已删除未使用的变量 eyeBonus
-
-        // 连接线（从后到前）
-        for (int i = n - 1; i > 0; i--) {
-            Point corner = state.snake.get(i - 1);
-            drawConnector(g, cells[i], corner, cells[i - 1], bodyColor, connectorWidth);
+        // 渐变端点：头亮 → 尾暗
+        Color bodyBright, bodyDark;
+        if (dead) {
+            bodyBright = theme.snakeDeadBody;
+            bodyDark = theme.snakeDeadBodyDark;
+        } else if (magnet) {
+            bodyBright = theme.magnetRingPulse;
+            bodyDark = theme.magnetRing;
+        } else if (invincible && !blink) {
+            bodyBright = headColor;
+            bodyDark = bodyColor;
+        } else {
+            bodyBright = theme.snakeBodyBright;
+            bodyDark = theme.snakeBodyDark;
         }
 
-        // 蛇尾
-        if (n > 1) {
-            drawTail(g, state, cells[n - 1], cells[n - 2], bodyColor, thicknessBonus);
-        }
+        int beadSize = CELL_SIZE - 6 + thicknessBonus * 2;
 
-        // 蛇身方块
-        for (int i = n - 2; i > 0; i--) {
-            double cx = cells[i][0] * CELL_SIZE + bodyInset;
-            double cy = cells[i][1] * CELL_SIZE + bodyInset;
-            int s = CELL_SIZE - bodyInset * 2;
-            g.setColor(bodyColor);
-            g.fillRoundRect((int) cx, (int) cy, s, s, 6, 6);
+        // 蛇身玻璃珠：从尾到头画（头压在最上）；尾部 2 颗渐小形成尾尖
+        for (int i = n - 1; i >= 1; i--) {
+            double t = (double) i / Math.max(1, n - 1);
+            Color c = lerp(bodyBright, bodyDark, t);
+            double[] p = pts.get(i);
+            int size = beadSize;
+            if (i == n - 1) {
+                size = (int) (beadSize * 0.6);
+            } else if (i == n - 2) {
+                size = (int) (beadSize * 0.8);
+            }
+            drawBead(g, p[0], p[1], size, c, outlineColor);
         }
 
         // 蛇头
-        drawHead(g, state, cells[0], headColor, outlineColor, thicknessBonus);
+        drawHead(g, state, pts.get(0), headColor, outlineColor, thicknessBonus, dead);
     }
 
     private void drawConnector(Graphics2D g, double[] current, Point corner, double[] prev,
@@ -386,103 +435,68 @@ public class SnakeRenderer {
         g.draw(path);
     }
 
-    private void drawTail(Graphics2D g, GameState state, double[] tail, double[] next,
-                          Color color, int thicknessBonus) {
-        double cx = cellCenter(tail[0], tail[1])[0];
-        double cy = cellCenter(tail[0], tail[1])[1];
-
-        double dx = next[0] - tail[0];
-        double dy = next[1] - tail[1];
-
-        double tx, ty;
-        if (Math.abs(dx) >= Math.abs(dy) && Math.abs(dx) > 0.001) {
-            tx = dx > 0 ? 1 : -1;
-            ty = 0;
-        } else if (Math.abs(dy) > 0.001) {
-            tx = 0;
-            ty = dy > 0 ? 1 : -1;
-        } else {
-            tx = state.direction.x();
-            ty = state.direction.y();
-        }
-
-        double tipX = cx - tx * CELL_SIZE * 0.48;
-        double tipY = cy - ty * CELL_SIZE * 0.48;
-        double baseX = cx + tx * CELL_SIZE * 0.36;
-        double baseY = cy + ty * CELL_SIZE * 0.36;
-        double halfW = CELL_SIZE * 0.36 + thicknessBonus * 1.2;
-        double px = -ty, py = tx;
-
-        g.setColor(color);
-        Path2D tailShape = new Path2D.Double();
-        tailShape.moveTo(tipX, tipY);
-        tailShape.lineTo(baseX + px * halfW, baseY + py * halfW);
-        tailShape.lineTo(baseX + tx * CELL_SIZE * 0.12, baseY + ty * CELL_SIZE * 0.12);
-        tailShape.lineTo(baseX - px * halfW, baseY - py * halfW);
-        tailShape.closePath();
-        g.fill(tailShape);
-    }
-
-    /** 绘制蛇头部的多边形 + 眼睛 + 鼻孔 + 舌头。方向向量 (dx, dy) 决定头部朝向。 */
+    /** 绘制蛇头玻璃珠 + 眼睛 + 鼻孔 + 舌头。朝向由 state.heading 决定；dead 时画 X 眼。 */
     private void drawHead(Graphics2D g, GameState state, double[] cell,
-                          Color color, Color outlineColor, int thicknessBonus) {
-        double cx = cellCenter(cell[0], cell[1])[0];
-        double cy = cellCenter(cell[0], cell[1])[1];
-        int dx = state.direction.x();
-        int dy = state.direction.y();
-        int px = -dy;
-        int py = dx;
+                          Color color, Color outlineColor, int thicknessBonus, boolean dead) {
+        double cx = cell[0];
+        double cy = cell[1];
+        double dx = Math.cos(state.heading);
+        double dy = Math.sin(state.heading);
+        double px = -dy, py = dx;
         double sizeBonus = thicknessBonus * 0.8;
+        int headSize = CELL_SIZE + (int) (sizeBonus * 2);
+        double r = headSize / 2.0;
 
-        double noseX = cx + dx * (CELL_SIZE * 0.55 + sizeBonus);
-        double noseY = cy + dy * (CELL_SIZE * 0.55 + sizeBonus);
-        double backX = cx - dx * (CELL_SIZE * 0.42 + sizeBonus * 0.5);
-        double backY = cy - dy * (CELL_SIZE * 0.42 + sizeBonus * 0.5);
-        double cheek = CELL_SIZE * 0.45 + sizeBonus;
-        double backW = CELL_SIZE * 0.30 + sizeBonus * 0.7;
-
-        // 头部多边形
-        Path2D head = new Path2D.Double();
-        head.moveTo(noseX, noseY);
-        head.lineTo(cx + dx * CELL_SIZE * 0.12 + px * cheek,
-                cy + dy * CELL_SIZE * 0.12 + py * cheek);
-        head.lineTo(backX + px * backW, backY + py * backW);
-        head.lineTo(backX, backY);
-        head.lineTo(backX - px * backW, backY - py * backW);
-        head.lineTo(cx + dx * CELL_SIZE * 0.12 - px * cheek,
-                cy + dy * CELL_SIZE * 0.12 - py * cheek);
-        head.closePath();
-
-        g.setStroke(new BasicStroke(2 + thicknessBonus / 2));
-        g.setColor(color);
-        g.fill(head);
+        // 头部玻璃珠（描边底 + 主体 + 高光）
         g.setColor(outlineColor);
-        g.draw(head);
+        g.fillOval((int) (cx - r - 1.5), (int) (cy - r - 1.5), headSize + 3, headSize + 3);
+        g.setColor(color);
+        g.fillOval((int) (cx - r), (int) (cy - r), headSize, headSize);
+        g.setColor(new Color(255, 255, 255, 120));
+        g.fillOval((int) (cx - r * 0.42), (int) (cy - r * 0.46),
+                (int) (headSize * 0.34), (int) (headSize * 0.28));
 
-        // 舌头
+        // 舌头（从头部前方伸出）
+        double noseX = cx + dx * r;
+        double noseY = cy + dy * r;
         drawTongue(g, noseX, noseY, dx, dy, px, py);
 
-        // 眼睛
-        double eyeFwd = CELL_SIZE * 0.18;
-        double eyeSide = CELL_SIZE * 0.23;
-        double pupilFwd = CELL_SIZE * 0.05;
-        for (int side : new int[]{-1, 1}) {
-            double ex = cx + dx * eyeFwd + px * eyeSide * side;
-            double ey = cy + dy * eyeFwd + py * eyeSide * side;
-            g.setColor(theme.snakeEye);
-            g.fillOval((int) (ex - 3.8), (int) (ey - 3.8), 8, 8);
-            g.setColor(theme.snakePupil);
-            g.fillOval((int) (ex + dx * pupilFwd - 1.7), (int) (ey + dy * pupilFwd - 1.7), 4, 4);
-        }
-
-        // 鼻孔
-        double nostFwd = CELL_SIZE * 0.40;
-        double nostSide = CELL_SIZE * 0.12;
-        for (int side : new int[]{-1, 1}) {
-            double nx = cx + dx * nostFwd + px * nostSide * side;
-            double ny = cy + dy * nostFwd + py * nostSide * side;
-            g.setColor(theme.snakePupil);
-            g.fillOval((int) (nx - 1.3), (int) (ny - 1.3), 3, 3);
+        if (dead) {
+            // X 形眼睛（暗底圆 + 白色交叉线）
+            double eyeFwd = r * 0.25, eyeSide = r * 0.46;
+            for (int side : new int[]{-1, 1}) {
+                double ex = cx + dx * eyeFwd + px * eyeSide * side;
+                double ey = cy + dy * eyeFwd + py * eyeSide * side;
+                g.setColor(theme.snakeDeadOutline);
+                g.fillOval((int) (ex - 4), (int) (ey - 4), 8, 8);
+                g.setColor(theme.text);
+                g.drawLine((int) (ex - 3), (int) (ey - 3), (int) (ex + 3), (int) (ey + 3));
+                g.drawLine((int) (ex + 3), (int) (ey - 3), (int) (ex - 3), (int) (ey + 3));
+            }
+        } else {
+            // 活眼：白底 + 青色虹膜 + 黑瞳 + 白色 catchlight
+            double eyeFwd = r * 0.18, eyeSide = r * 0.46;
+            double pupilFwd = r * 0.05;
+            for (int side : new int[]{-1, 1}) {
+                double ex = cx + dx * eyeFwd + px * eyeSide * side;
+                double ey = cy + dy * eyeFwd + py * eyeSide * side;
+                g.setColor(theme.snakeEye);
+                g.fillOval((int) (ex - 4.5), (int) (ey - 4.5), 9, 9);
+                g.setColor(theme.snakeIris);
+                g.fillOval((int) (ex - 3.2), (int) (ey - 3.2), 7, 7);
+                g.setColor(theme.snakePupil);
+                g.fillOval((int) (ex + dx * pupilFwd - 1.8), (int) (ey + dy * pupilFwd - 1.8), 4, 4);
+                g.setColor(new Color(255, 255, 255, 220));
+                g.fillOval((int) (ex - 1.5), (int) (ey - 1.8), 2, 2);
+            }
+            // 鼻孔
+            double nostFwd = r * 0.55, nostSide = r * 0.28;
+            for (int side : new int[]{-1, 1}) {
+                double nx = cx + dx * nostFwd + px * nostSide * side;
+                double ny = cy + dy * nostFwd + py * nostSide * side;
+                g.setColor(outlineColor);
+                g.fillOval((int) (nx - 1.3), (int) (ny - 1.3), 3, 3);
+            }
         }
     }
 
@@ -510,30 +524,27 @@ public class SnakeRenderer {
     // =========================================================================
 
     private void drawDeathAnimation(Graphics2D g, GameState state, double now) {
-        if (state.deathUntil <= now || state.snake.isEmpty()) return;
+        if (state.deathUntil <= now || state.body.isEmpty()) return;
         double progress = Math.min(1, Math.max(0, (now - state.deathStartedAt) / DEATH_ANIMATION_SECONDS));
-        Point head = state.snake.get(0);
-        double cx = (head.x() + 0.5) * CELL_SIZE;
-        double cy = (head.y() + 0.5) * CELL_SIZE;
+        double[] head = state.body.get(0);
+        double cx = head[0];
+        double cy = head[1];
 
-        if (state.deathByWall && state.deathDirection != null) {
-            drawDeadWallFace(g, cx, cy, state.deathDirection);
-        }
-
-        // 能量圈
-        double radius = CELL_SIZE * (0.35 + progress * 0.85);
-        int strokeWidth = Math.max(1, (int) (5 - progress * 4));
+        // 红色冲击波环（向外扩散、描边渐细）
+        double radius = CELL_SIZE * (0.4 + progress * 0.9);
+        int strokeWidth = Math.max(1, (int) (6 - progress * 5));
         g.setStroke(new BasicStroke(strokeWidth));
-        g.setColor(theme.wallBreakFlash);
+        g.setColor(theme.deathShockwave);
         g.drawOval((int) (cx - radius), (int) (cy - radius),
                 (int) (radius * 2), (int) (radius * 2));
 
-        // 闪烁框
+        // 闪烁框（围绕头部所在格）
         if ((int) (now * 14) % 2 == 0) {
             g.setStroke(STROKE_2);
-            g.setColor(decode("#fef08a"));
-            g.drawRect(head.x() * CELL_SIZE + 2, head.y() * CELL_SIZE + 2,
-                    CELL_SIZE - 4, CELL_SIZE - 4);
+            g.setColor(theme.deathShockwave);
+            int hx = (int) (head[0] / CELL_SIZE) * CELL_SIZE;
+            int hy = (int) (head[1] / CELL_SIZE) * CELL_SIZE;
+            g.drawRect(hx + 2, hy + 2, CELL_SIZE - 4, CELL_SIZE - 4);
         }
     }
 
@@ -722,6 +733,31 @@ public class SnakeRenderer {
     private double effectProgress(double startedAt, double until, double now) {
         if (startedAt <= 0 || until <= startedAt) return 1.0;
         return Math.min(1.0, Math.max(0.0, (now - startedAt) / POWER_UP_DURATION_SECONDS));
+    }
+
+    /** 绘制一颗玻璃珠：描边底 + 主体 + 左上玻璃高光。 */
+    private void drawBead(Graphics2D g, double cx, double cy, int size, Color color, Color outline) {
+        double r = size / 2.0;
+        g.setColor(outline);
+        g.fillOval((int) (cx - r - 1), (int) (cy - r - 1), size + 2, size + 2);
+        g.setColor(color);
+        g.fillOval((int) (cx - r), (int) (cy - r), size, size);
+        g.setColor(new Color(255, 255, 255, 110));
+        g.fillOval((int) (cx - r * 0.45), (int) (cy - r * 0.5),
+                (int) (size * 0.34), (int) (size * 0.28));
+    }
+
+    /** 线性插值两个颜色，t∈[0,1]。 */
+    private static Color lerp(Color a, Color b, double t) {
+        int r = (int) (a.getRed() + (b.getRed() - a.getRed()) * t);
+        int gg = (int) (a.getGreen() + (b.getGreen() - a.getGreen()) * t);
+        int bl = (int) (a.getBlue() + (b.getBlue() - a.getBlue()) * t);
+        return new Color(r, gg, bl);
+    }
+
+    /** 给颜色叠加 alpha（0–255）。 */
+    private static Color withAlpha(Color c, int a) {
+        return new Color(c.getRed(), c.getGreen(), c.getBlue(), a);
     }
 
     private static Color decode(String hex) {
