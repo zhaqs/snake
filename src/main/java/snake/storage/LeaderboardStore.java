@@ -20,6 +20,9 @@ import java.util.Map;
  *
  * <p>连接信息通过 {@code SNAKE_DB_HOST}、{@code SNAKE_DB_PORT}、
  * {@code SNAKE_DB_NAME}、{@code SNAKE_DB_USER} 和 {@code SNAKE_DB_PASSWORD} 配置。
+ *
+ * <p>运行时所有数据访问共享单一连接（失败时自动重连）；一旦任何 SQL 操作失败，
+ * 立即切换到内存态并合并已读数据，避免对不可用的数据库反复重试。
  */
 public class LeaderboardStore {
 
@@ -51,9 +54,10 @@ public class LeaderboardStore {
     /** 排行榜的一行：玩家名、历史最好分数、历史最长蛇身。 */
     public record Entry(String name, int bestScore, int bestLength) {}
 
-    private boolean memoryFallback = false;
+    private volatile boolean memoryFallback = false;
     private final Map<String, Entry> memory = new HashMap<>();
     private int memoryHigh = 0;
+    private Connection shared;
 
     public LeaderboardStore() {
         init();
@@ -102,26 +106,44 @@ public class LeaderboardStore {
         return DriverManager.getConnection(DB_URL, USER, PASSWORD);
     }
 
+    /**
+     * 返回共享连接；失效时自动重连。调用方只负责关闭 Statement/ResultSet，
+     * 不得关闭返回的连接。
+     */
+    private synchronized Connection conn() throws SQLException {
+        if (shared == null || shared.isClosed() || !shared.isValid(2)) {
+            if (shared != null) {
+                try {
+                    shared.close();
+                } catch (SQLException ignored) {
+                    // 旧连接已失效，忽略
+                }
+            }
+            shared = DriverManager.getConnection(DB_URL, USER, PASSWORD);
+        }
+        return shared;
+    }
+
     /** 加载全局最高分（单行，id=1）。 */
-    public int loadHighScore() {
+    public synchronized int loadHighScore() {
         if (memoryFallback) {
             return memoryHigh;
         }
-        try (Connection conn = openConn();
-             PreparedStatement ps = conn.prepareStatement("SELECT score FROM high_score WHERE id = 1");
+        try (PreparedStatement ps = conn().prepareStatement("SELECT score FROM high_score WHERE id = 1");
              ResultSet rs = ps.executeQuery()) {
             if (rs.next()) {
                 return Math.max(0, rs.getInt("score"));
             }
             return 0;
         } catch (SQLException e) {
-            System.err.println("[LeaderboardStore] 读取最高分失败：" + e.getMessage());
+            System.err.println("[LeaderboardStore] 读取最高分失败，降级为内存态：" + e.getMessage());
+            memoryFallback = true;
             return memoryHigh;
         }
     }
 
     /** 更新最高分为历史最好（取较大值）。 */
-    public void saveHighScore(int score) {
+    public synchronized void saveHighScore(int score) {
         int best = Math.max(0, score);
         if (memoryFallback) {
             memoryHigh = Math.max(memoryHigh, best);
@@ -129,11 +151,12 @@ public class LeaderboardStore {
         }
         String sql = "INSERT INTO high_score (id, score) VALUES (1, ?) "
                 + "ON DUPLICATE KEY UPDATE score = GREATEST(score, VALUES(score))";
-        try (Connection conn = openConn(); PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn().prepareStatement(sql)) {
             ps.setInt(1, best);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[LeaderboardStore] 写入最高分失败：" + e.getMessage());
+            System.err.println("[LeaderboardStore] 写入最高分失败，降级为内存态：" + e.getMessage());
+            memoryFallback = true;
             memoryHigh = Math.max(memoryHigh, best);
         }
     }
@@ -142,7 +165,7 @@ public class LeaderboardStore {
      * 更新某玩家的排行纪录（取历史最好值），返回是否发生变化。
      * 对应 Python {@code update_player_record}。
      */
-    public boolean updateRecord(String rawName, int score, int length) {
+    public synchronized boolean updateRecord(String rawName, int score, int length) {
         String name = normalizePlayerName(rawName);
         if (name.isEmpty()) {
             return false;
@@ -150,54 +173,47 @@ public class LeaderboardStore {
         int bestScore = Math.max(0, score);
         int bestLength = Math.max(0, length);
         if (memoryFallback) {
-            Entry prev = memory.getOrDefault(name, new Entry(name, 0, 0));
-            boolean changed = bestScore > prev.bestScore || bestLength > prev.bestLength || !memory.containsKey(name);
-            memory.put(name, new Entry(name,
-                    Math.max(prev.bestScore, bestScore),
-                    Math.max(prev.bestLength, bestLength)));
-            return changed;
+            return mergeMemory(name, bestScore, bestLength);
         }
         String sql = "INSERT INTO leaderboard (player_name, best_score, best_length) VALUES (?, ?, ?) "
                 + "ON DUPLICATE KEY UPDATE "
                 + "best_score = GREATEST(best_score, VALUES(best_score)), "
                 + "best_length = GREATEST(best_length, VALUES(best_length))";
-        try (Connection conn = openConn(); PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn().prepareStatement(sql)) {
             ps.setString(1, name);
             ps.setInt(2, bestScore);
             ps.setInt(3, bestLength);
             ps.executeUpdate();
             return true; // 粗粒度判定，避免额外查询；写即视为可能变化
         } catch (SQLException e) {
-            System.err.println("[LeaderboardStore] 写入排行失败：" + e.getMessage());
-            Entry prev = memory.getOrDefault(name, new Entry(name, 0, 0));
-            boolean changed = bestScore > prev.bestScore || bestLength > prev.bestLength || !memory.containsKey(name);
-            memory.put(name, new Entry(name,
-                    Math.max(prev.bestScore, bestScore),
-                    Math.max(prev.bestLength, bestLength)));
-            return changed;
+            System.err.println("[LeaderboardStore] 写入排行失败，降级为内存态：" + e.getMessage());
+            memoryFallback = true;
+            return mergeMemory(name, bestScore, bestLength);
         }
+    }
+
+    /** 合并一条纪录到内存表，返回是否发生变化。 */
+    private boolean mergeMemory(String name, int bestScore, int bestLength) {
+        Entry prev = memory.getOrDefault(name, new Entry(name, 0, 0));
+        boolean changed = bestScore > prev.bestScore || bestLength > prev.bestLength || !memory.containsKey(name);
+        memory.put(name, new Entry(name,
+                Math.max(prev.bestScore, bestScore),
+                Math.max(prev.bestLength, bestLength)));
+        return changed;
     }
 
     /**
      * 按 蛇身长度/分数/名字 取时间序返回前 limit 名，对应 Python {@code top_by_length}。
      */
-    public List<Entry> topByLength(int limit) {
+    public synchronized List<Entry> topByLength(int limit) {
         int cap = Math.max(0, limit);
         if (memoryFallback) {
-            List<Entry> all = new ArrayList<>(memory.values());
-            all.sort((a, b) -> {
-                int c = Integer.compare(b.bestLength, a.bestLength);
-                if (c != 0) return c;
-                c = Integer.compare(b.bestScore, a.bestScore);
-                if (c != 0) return c;
-                return a.name.compareToIgnoreCase(b.name);
-            });
-            return all.size() > cap ? new ArrayList<>(all.subList(0, cap)) : all;
+            return sortMemory(cap);
         }
         String sql = "SELECT player_name, best_score, best_length FROM leaderboard "
                 + "ORDER BY best_length DESC, best_score DESC, player_name ASC LIMIT ?";
         List<Entry> out = new ArrayList<>();
-        try (Connection conn = openConn(); PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn().prepareStatement(sql)) {
             ps.setInt(1, cap);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -207,22 +223,37 @@ public class LeaderboardStore {
                 }
             }
         } catch (SQLException e) {
-            System.err.println("[LeaderboardStore] 读取排行失败：" + e.getMessage());
+            System.err.println("[LeaderboardStore] 读取排行失败，降级为内存态：" + e.getMessage());
+            memoryFallback = true;
+            return sortMemory(cap);
         }
         return out;
+    }
+
+    /** 对内存表按 长度/分数/名字 排序并截取前 cap 条。 */
+    private List<Entry> sortMemory(int cap) {
+        List<Entry> all = new ArrayList<>(memory.values());
+        all.sort((a, b) -> {
+            int c = Integer.compare(b.bestLength, a.bestLength);
+            if (c != 0) return c;
+            c = Integer.compare(b.bestScore, a.bestScore);
+            if (c != 0) return c;
+            return a.name.compareToIgnoreCase(b.name);
+        });
+        return all.size() > cap ? new ArrayList<>(all.subList(0, cap)) : all;
     }
 
     /**
      * 获取某玩家的个人纪录，不存在则返回 null。
      */
-    public Entry getRecord(String rawName) {
+    public synchronized Entry getRecord(String rawName) {
         String name = normalizePlayerName(rawName);
         if (name.isEmpty()) return null;
         if (memoryFallback) {
             return memory.get(name);
         }
         String sql = "SELECT player_name, best_score, best_length FROM leaderboard WHERE player_name = ?";
-        try (Connection conn = openConn(); PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn().prepareStatement(sql)) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
@@ -232,7 +263,9 @@ public class LeaderboardStore {
                 }
             }
         } catch (SQLException e) {
-            System.err.println("[LeaderboardStore] 读取玩家纪录失败：" + e.getMessage());
+            System.err.println("[LeaderboardStore] 读取玩家纪录失败，降级为内存态：" + e.getMessage());
+            memoryFallback = true;
+            return memory.get(name);
         }
         return null;
     }

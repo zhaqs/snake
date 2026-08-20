@@ -11,17 +11,40 @@ import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.Toolkit;
 import java.awt.event.KeyEvent;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Random;
+import java.util.Set;
 
-import javax.swing.*;
+import javax.swing.AbstractAction;
+import javax.swing.Action;
+import javax.swing.BorderFactory;
+import javax.swing.JComponent;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JRootPane;
+import javax.swing.KeyStroke;
+import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
+import javax.swing.Timer;
+import javax.swing.WindowConstants;
 
 import snake.audio.AudioBeep;
 import snake.input.DirectionInput;
-import snake.model.*;
+import snake.model.Point;
+import snake.model.PowerUp;
+import snake.model.PowerUpKind;
+import snake.model.WallBreakEffect;
 import snake.render.PositionProvider;
 import snake.render.SnakeRenderer;
+import snake.rules.MagnetLogic;
+import snake.rules.Progression;
 import snake.rules.SnakeRules;
+import snake.rules.TurnQueueLogic;
 import snake.state.GameState;
 import snake.storage.LeaderboardStore;
 
@@ -46,6 +69,14 @@ public final class SnakeGame implements PositionProvider {
 
     private String playerName;
     private boolean spaceDown;
+
+    /** 排行榜缓存：仅在有资格显示榜单的状态切换时刷新，避免绘制线程访问数据库。 */
+    private List<LeaderboardStore.Entry> cachedLeaders = List.of();
+    private LeaderboardStore.Entry cachedPlayerEntry;
+
+    /** 异步加载的排行榜快照。 */
+    private record LeaderboardSnapshot(List<LeaderboardStore.Entry> leaders,
+                                       LeaderboardStore.Entry player) {}
 
     // ===================================================================
     // 构造
@@ -134,6 +165,7 @@ public final class SnakeGame implements PositionProvider {
             }
             playerName = LeaderboardStore.normalizePlayerName(input);
         }
+        refreshLeaderboardAsync();
     }
 
     // ===================================================================
@@ -267,6 +299,7 @@ public final class SnakeGame implements PositionProvider {
         state.resetRound(body, now());
         deathTimer = null;
         placeFood();
+        refreshLeaderboardAsync();
         updateView(now());
     }
 
@@ -302,53 +335,30 @@ public final class SnakeGame implements PositionProvider {
             return;
         }
 
-        // Python 的 _enqueue_turn 逻辑
+        // Python 的 _enqueue_turn 逻辑：先同步移动进度以判断是否可立即转弯
+        boolean immediateAllowed = false;
         if (state.turnQueue.isEmpty()) {
-            Point effective = state.direction;
-            if (requested.equals(effective)
-                    || SnakeRules.directionsAreOppposites(requested.x(), requested.y(), effective.x(), effective.y())) {
-                return;
-            }
-            // 立即转弯检查
             double now = now();
             syncMoveProgress(now);
-            if (state.running && !state.paused && state.moveProgress <= IMMEDIATE_TURN_PROGRESS_LIMIT) {
+            immediateAllowed = state.running && !state.paused && state.moveProgress <= IMMEDIATE_TURN_PROGRESS_LIMIT;
+        }
+
+        switch (TurnQueueLogic.decide(state.direction, state.turnQueue, requested,
+                immediateAllowed, TURN_QUEUE_LIMIT)) {
+            case IMMEDIATE -> {
+                double now = now();
                 state.direction = requested;
                 state.lastMoveAt = now;
                 state.moveProgress = 0.0;
                 updateView(now);
-                return;
             }
-        } else {
-            Point effective = state.turnQueue.peekLast();
-            Point previous = state.turnQueue.size() > 1
-                    ? state.turnQueue.stream().skip(state.turnQueue.size() - 2).findFirst().orElse(state.direction)
-                    : state.direction;
-            if (requested.equals(effective)) return;
-            if (SnakeRules.directionsAreOppposites(requested.x(), requested.y(), effective.x(), effective.y())) {
-                if (requested.equals(previous)
-                        || SnakeRules.directionsAreOppposites(requested.x(), requested.y(), previous.x(), previous.y())) {
-                    return;
-                }
+            case REPLACE -> {
                 state.turnQueue.removeLast();
                 state.turnQueue.addLast(requested);
-                return;
             }
+            case APPEND -> state.turnQueue.addLast(requested);
+            case IGNORE -> { }
         }
-
-        if (state.turnQueue.size() >= TURN_QUEUE_LIMIT) {
-            Point prev = state.turnQueue.size() > 1
-                    ? state.turnQueue.stream().skip(state.turnQueue.size() - 2).findFirst().orElse(state.direction)
-                    : state.direction;
-            if (requested.equals(prev)
-                    || SnakeRules.directionsAreOppposites(requested.x(), requested.y(), prev.x(), prev.y())) {
-                return;
-            }
-            state.turnQueue.removeLast();
-            state.turnQueue.addLast(requested);
-            return;
-        }
-        state.turnQueue.addLast(requested);
     }
 
     private void spacePressed() {
@@ -445,7 +455,7 @@ public final class SnakeGame implements PositionProvider {
 
     /** 每 5 分升一级：加快速度、增加障碍物、显示等级提示。 */
     private void updateLevel(double now) {
-        int newLevel = state.score / LEVEL_SCORE_STEP + 1;
+        int newLevel = Progression.levelForScore(state.score, LEVEL_SCORE_STEP);
         if (newLevel <= state.level) return;
         state.level = newLevel;
         state.levelNoticeUntil = now + LEVEL_NOTICE_SECONDS;
@@ -454,7 +464,7 @@ public final class SnakeGame implements PositionProvider {
 
     /** 在当前等级应生成的障碍物数量与已存在数量之间补齐，不超过 {@code MAX_OBSTACLES}。 */
     private void growObstacles() {
-        int target = Math.min(MAX_OBSTACLES, (state.level - 1) * OBSTACLES_PER_LEVEL);
+        int target = Progression.obstacleTargetForLevel(state.level, OBSTACLES_PER_LEVEL, MAX_OBSTACLES);
         while (state.obstacles.size() < target) {
             Set<Point> blocked = obstacleSpawnBlockers();
             Point cell = randomFreeCell(blocked);
@@ -498,7 +508,8 @@ public final class SnakeGame implements PositionProvider {
         Set<Point> blockedForFood = new HashSet<>(state.snake);
         blockedForFood.addAll(state.obstacles);
         if (state.powerUp != null) blockedForFood.add(state.powerUp.position());
-        state.food = pullToward(state.food, head, blockedForFood);
+        state.food = MagnetLogic.pullToward(state.food, head, blockedForFood,
+                MAGNET_PULL_STEPS, MAGNET_RADIUS, GRID_WIDTH, GRID_HEIGHT);
 
         boolean collected = mayCollect
                 && SnakeRules.manhattanDistance(state.food, head) <= MAGNET_AUTO_PICKUP_RADIUS;
@@ -508,41 +519,12 @@ public final class SnakeGame implements PositionProvider {
             Set<Point> blockedForPU = new HashSet<>(state.snake);
             blockedForPU.addAll(state.obstacles);
             if (!collected) blockedForPU.add(state.food);
-            Point moved = pullToward(state.powerUp.position(), head, blockedForPU);
+            Point moved = MagnetLogic.pullToward(state.powerUp.position(), head, blockedForPU,
+                    MAGNET_PULL_STEPS, MAGNET_RADIUS, GRID_WIDTH, GRID_HEIGHT);
             state.powerUp = new PowerUp(state.powerUp.kind(), moved);
         }
 
         return collected;
-    }
-
-    /**
-     * 将一个点向目标方向拉近一步。优先沿距离较大的轴移动（如 x 差≥y 差则先 x 后 y），
-     * 若目标格被阻挡则尝试另一轴，两步都不可行则停止。
-     * 对应 Python 的 {@code attracted_position}。
-     */
-    private Point pullToward(Point from, Point target, Set<Point> blocked) {
-        Point current = from;
-        for (int step = 0; step < MAGNET_PULL_STEPS
-                && SnakeRules.manhattanDistance(current, target) <= MAGNET_RADIUS; step++) {
-            int dx = Integer.compare(target.x(), current.x());
-            int dy = Integer.compare(target.y(), current.y());
-            // 优先沿距离大的轴移动
-            Point[] orderedSteps = Math.abs(target.x() - current.x()) >= Math.abs(target.y() - current.y())
-                    ? new Point[]{new Point(dx, 0), new Point(0, dy)}
-                    : new Point[]{new Point(0, dy), new Point(dx, 0)};
-            boolean moved = false;
-            for (Point stepDir : orderedSteps) {
-                if (stepDir.x() == 0 && stepDir.y() == 0) continue;
-                Point candidate = current.moved(stepDir);
-                if (SnakeRules.pointInBounds(candidate, GRID_WIDTH, GRID_HEIGHT) && !blocked.contains(candidate)) {
-                    current = candidate;
-                    moved = true;
-                    break;
-                }
-            }
-            if (!moved) break;
-        }
-        return current;
     }
 
     // ===================================================================
@@ -562,6 +544,48 @@ public final class SnakeGame implements PositionProvider {
     // ===================================================================
     // 游戏结束
     // ===================================================================
+
+    /**
+     * 在后台线程异步保存本局纪录，完成后刷新排行榜缓存。
+     * 避免数据库写入阻塞 Swing 事件线程。
+     */
+    private void saveRecordAsync() {
+        final String name = playerName;
+        final int score = state.score;
+        final int length = state.snake.size();
+        new SwingWorker<Void, Void>() {
+            @Override protected Void doInBackground() {
+                store.updateRecord(name, score, length);
+                return null;
+            }
+            @Override protected void done() {
+                refreshLeaderboardAsync();
+            }
+        }.execute();
+    }
+
+    /**
+     * 在后台线程异步加载排行榜并写入缓存（{@code cachedLeaders}/{@code cachedPlayerEntry}）。
+     * {@code done()} 在 EDT 上执行，随后触发重绘。
+     */
+    private void refreshLeaderboardAsync() {
+        final String name = playerName;
+        new SwingWorker<LeaderboardSnapshot, Void>() {
+            @Override protected LeaderboardSnapshot doInBackground() {
+                return new LeaderboardSnapshot(store.topByLength(5), store.getRecord(name));
+            }
+            @Override protected void done() {
+                try {
+                    LeaderboardSnapshot snapshot = get();
+                    cachedLeaders = snapshot.leaders();
+                    cachedPlayerEntry = snapshot.player();
+                } catch (Exception ignored) {
+                    // 保持旧缓存，重试由下一次状态切换触发
+                }
+                board.repaint();
+            }
+        }.execute();
+    }
 
     /**
      * 游戏结束流程：
@@ -584,7 +608,7 @@ public final class SnakeGame implements PositionProvider {
         state.deathDirection = state.direction;
         state.deathByWall = wall;
 
-        store.updateRecord(playerName, state.score, state.snake.size());
+        saveRecordAsync();
 
         // 死亡动画计时器：在死亡持续期间逐帧刷新视图
         if (deathTimer != null) deathTimer.stop();
@@ -758,10 +782,9 @@ public final class SnakeGame implements PositionProvider {
             Graphics2D g = (Graphics2D) raw.create();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             double now = now();
-            List<LeaderboardStore.Entry> leaders = (state.gameOver || (!state.running && !state.paused))
-                    ? store.topByLength(5) : List.of();
-            LeaderboardStore.Entry playerEntry = (state.gameOver || (!state.running && !state.paused))
-                    ? store.getRecord(playerName) : null;
+            boolean overlayVisible = state.gameOver || (!state.running && !state.paused);
+            List<LeaderboardStore.Entry> leaders = overlayVisible ? cachedLeaders : List.of();
+            LeaderboardStore.Entry playerEntry = overlayVisible ? cachedPlayerEntry : null;
             renderer.draw(g, state, now, SnakeGame.this, playerName, leaders, playerEntry);
             g.dispose();
         }

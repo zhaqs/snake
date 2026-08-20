@@ -49,35 +49,41 @@ public class GameState {
      */
     public void resetRound(List<Point> snakeBody, double now) {
         int keepHigh = this.highScore;
-        GameState defaults = new GameState();
-        defaults.highScore = keepHigh;
-
+        applyDefaults();
         this.snake = new ArrayList<>(snakeBody);
-        this.direction = defaults.direction;
+        this.highScore = keepHigh;
+        this.lastMoveAt = now;
+        // food 由调用方随后 place
+    }
+
+    /** 将全部字段复位为默认值。新增字段时必须同步在此处给出默认值。 */
+    private void applyDefaults() {
+        this.snake = new ArrayList<>();
+        this.direction = Point.RIGHT;
         this.turnQueue.clear();
-        this.powerUp = defaults.powerUp;
-        this.score = defaults.score;
-        this.highScore = defaults.highScore;
-        this.level = defaults.level;
+        this.food = new Point(0, 0);
+        this.powerUp = null;
+        this.score = 0;
+        this.highScore = 0;
+        this.level = 1;
         this.obstacles = new HashSet<>();
         this.wallBreakEffects = new ArrayList<>();
-        this.running = defaults.running;
-        this.paused = defaults.paused;
-        this.gameOver = defaults.gameOver;
-        this.boosting = defaults.boosting;
-        this.invincibleStartedAt = defaults.invincibleStartedAt;
-        this.invincibleUntil = defaults.invincibleUntil;
-        this.magnetStartedAt = defaults.magnetStartedAt;
-        this.magnetUntil = defaults.magnetUntil;
-        this.levelNoticeUntil = defaults.levelNoticeUntil;
-        this.nextPowerUpSpawnAt = defaults.nextPowerUpSpawnAt;
-        this.moveProgress = defaults.moveProgress;
-        this.lastMoveAt = now;
-        this.deathStartedAt = defaults.deathStartedAt;
-        this.deathUntil = defaults.deathUntil;
-        this.deathDirection = defaults.deathDirection;
-        this.deathByWall = defaults.deathByWall;
-        // food 由调用方随后 place
+        this.running = false;
+        this.paused = false;
+        this.gameOver = false;
+        this.boosting = false;
+        this.invincibleStartedAt = 0.0;
+        this.invincibleUntil = 0.0;
+        this.magnetStartedAt = 0.0;
+        this.magnetUntil = 0.0;
+        this.levelNoticeUntil = 0.0;
+        this.nextPowerUpSpawnAt = 0.0;
+        this.moveProgress = 0.0;
+        this.lastMoveAt = 0.0;
+        this.deathStartedAt = 0.0;
+        this.deathUntil = 0.0;
+        this.deathDirection = null;
+        this.deathByWall = false;
     }
 
     public boolean invincibleActive(double now) {

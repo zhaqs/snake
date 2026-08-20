@@ -25,6 +25,25 @@ import snake.storage.LeaderboardStore;
  */
 public class SnakeRenderer {
 
+    /** 缓存常用绘制资源，避免每帧重新分配。 */
+    private static final Font FONT_BOLD_26 = new Font("SansSerif", Font.BOLD, 26);
+    private static final Font FONT_BOLD_16 = new Font("SansSerif", Font.BOLD, 16);
+    private static final Font FONT_BOLD_13 = new Font("SansSerif", Font.BOLD, 13);
+    private static final Font FONT_BOLD_12 = new Font("SansSerif", Font.BOLD, 12);
+    private static final Font FONT_BOLD_11 = new Font("SansSerif", Font.BOLD, 11);
+    private static final Font FONT_PLAIN_11 = new Font("SansSerif", Font.PLAIN, 11);
+    private static final Font FONT_PLAIN_10 = new Font("SansSerif", Font.PLAIN, 10);
+
+    private static final BasicStroke STROKE_1 = new BasicStroke(1f);
+    private static final BasicStroke STROKE_2 = new BasicStroke(2f);
+    private static final BasicStroke STROKE_ROUND_2 =
+            new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
+    private static final BasicStroke STROKE_ROUND_3 =
+            new BasicStroke(3f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
+    private static final BasicStroke STROKE_BEAM =
+            new BasicStroke(2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
+                    10f, new float[]{5f, 4f}, 0f);
+
     private final GameConfig.Theme theme;
     private final int width;
     private final int height;
@@ -105,7 +124,7 @@ public class SnakeRenderer {
     // =========================================================================
 
     private void drawObstacles(Graphics2D g, GameState state) {
-        g.setStroke(new BasicStroke(1f));
+        g.setStroke(STROKE_1);
         for (Point p : state.obstacles) {
             int pad = 3;
             int x = p.x() * CELL_SIZE + pad;
@@ -144,7 +163,7 @@ public class SnakeRenderer {
 
             // 裂纹（6 条方向）
             double crackLength = CELL_SIZE * (0.22 + progress * 0.36);
-            g.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            g.setStroke(STROKE_ROUND_2);
             g.setColor(theme.wallBreakCrack);
             double[][] crackDirs = {
                     {-1.0, -0.25}, {-0.3, -1.0}, {0.7, -0.75},
@@ -162,16 +181,16 @@ public class SnakeRenderer {
                     {1.0, 0.08}, {0.55, 0.95}, {-0.78, 0.76}
             };
             g.setColor(theme.wallBreakFragment);
-            g.setStroke(new BasicStroke(1f));
+            g.setStroke(STROKE_1);
             for (int idx = 0; idx < fragDirs.length; idx++) {
-                double travel = (7 + ((effect.seed() + idx * 3) % 6) * 2.5) * progress;
+                double travel = (7 + Math.floorMod(effect.seed() + idx * 3, 6) * 2.5) * progress;
                 double size = Math.max(2.0, 5.5 * (1.0 - progress));
                 double fx = cx + fragDirs[idx][0] * travel;
                 double fy = cy + fragDirs[idx][1] * travel;
                 g.fillRect((int) (fx - size), (int) (fy - size), (int) (size * 2), (int) (size * 2));
             }
         }
-        g.setStroke(new BasicStroke(1f));
+        g.setStroke(STROKE_1);
     }
 
     // =========================================================================
@@ -187,7 +206,7 @@ public class SnakeRenderer {
         g.setColor(theme.powerUpColor(powerUp.kind()));
         g.fillRoundRect(x, y, s, s, 6, 6);
         g.setColor(theme.text);
-        g.setFont(new Font("SansSerif", Font.BOLD, 11));
+        g.setFont(FONT_BOLD_11);
         String sym = theme.powerUpSymbol(powerUp.kind());
         FontMetrics fm = g.getFontMetrics();
         int tx = x + (s - fm.stringWidth(sym)) / 2;
@@ -206,12 +225,12 @@ public class SnakeRenderer {
         int radius = MAGNET_RADIUS * CELL_SIZE;
         double pulse = (now * 3.5) % 1.0;
 
-        g.setStroke(new BasicStroke(2f));
+        g.setStroke(STROKE_2);
         g.setColor(theme.magnetRing);
         g.drawOval(cx - radius, cy - radius, radius * 2, radius * 2);
 
         double pulseR = radius * (0.72 + pulse * 0.28);
-        g.setStroke(new BasicStroke(1f));
+        g.setStroke(STROKE_1);
         g.setColor(theme.magnetRingPulse);
         g.drawOval((int) (cx - pulseR), (int) (cy - pulseR),
                 (int) (pulseR * 2), (int) (pulseR * 2));
@@ -237,7 +256,7 @@ public class SnakeRenderer {
     private void drawTargetGlow(Graphics2D g, int cx, int cy, double now) {
         double pulse = (now * 5.0) % 1.0;
         int radius = (int) (CELL_SIZE * (0.52 + pulse * 0.18));
-        g.setStroke(new BasicStroke(2f));
+        g.setStroke(STROKE_2);
         g.setColor(theme.magnetTargetGlow);
         g.drawOval(cx - radius, cy - radius, radius * 2, radius * 2);
     }
@@ -249,8 +268,7 @@ public class SnakeRenderer {
         if (dist < 2) return;
 
         // 虚线束
-        g.setStroke(new BasicStroke(2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
-                10f, new float[]{5f, 4f}, 0f));
+        g.setStroke(STROKE_BEAM);
         g.setColor(theme.magnetBeam);
         g.drawLine(tx, ty, hx, hy);
 
@@ -273,7 +291,7 @@ public class SnakeRenderer {
         g.fill(arrow);
 
         // 粒子（5 个沿路径移动的点）
-        g.setStroke(new BasicStroke(1f));
+        g.setStroke(STROKE_1);
         for (int i = 0; i < 5; i++) {
             double p = (now * 2.8 + i * 0.2) % 1.0;
             int px = (int) (tx + dx * p);
@@ -477,7 +495,7 @@ public class SnakeRenderer {
         double tipX = noseX + dx * CELL_SIZE * 0.55;
         double tipY = noseY + dy * CELL_SIZE * 0.55;
 
-        g.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setStroke(STROKE_ROUND_2);
         g.setColor(theme.snakeTongue);
         g.drawLine((int) startX, (int) startY, (int) forkX, (int) forkY);
         for (int side : new int[]{-1, 1}) {
@@ -512,7 +530,7 @@ public class SnakeRenderer {
 
         // 闪烁框
         if ((int) (now * 14) % 2 == 0) {
-            g.setStroke(new BasicStroke(2f));
+            g.setStroke(STROKE_2);
             g.setColor(decode("#fef08a"));
             g.drawRect(head.x() * CELL_SIZE + 2, head.y() * CELL_SIZE + 2,
                     CELL_SIZE - 4, CELL_SIZE - 4);
@@ -524,7 +542,7 @@ public class SnakeRenderer {
         int dy = direction.y();
         int px = -dy, py = dx;
 
-        g.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setStroke(STROKE_ROUND_2);
         for (int side : new int[]{-1, 1}) {
             double ex = cx + dx * 3 + px * 5 * side;
             double ey = cy + dy * 3 + py * 5 * side;
@@ -537,14 +555,14 @@ public class SnakeRenderer {
         }
 
         // 舌头
-        g.setStroke(new BasicStroke(3f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setStroke(STROKE_ROUND_3);
         g.setColor(theme.snakeTongue);
         double tongueStartX = cx + dx * 5;
         double tongueStartY = cy + dy * 5;
         double forkX = cx + dx * 9;
         double forkY = cy + dy * 9;
         g.drawLine((int) tongueStartX, (int) tongueStartY, (int) forkX, (int) forkY);
-        g.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setStroke(STROKE_ROUND_2);
         for (int side : new int[]{-1, 1}) {
             g.drawLine((int) forkX, (int) forkY,
                     (int) (forkX - dx * 2 + px * 3 * side),
@@ -591,7 +609,7 @@ public class SnakeRenderer {
         // 排行榜（欢迎页 + 游戏结束页都显示）
         if (!state.running && !state.paused) {
             int startY = height / 2 + 62;
-            g.setFont(new Font("SansSerif", Font.BOLD, 13));
+            g.setFont(FONT_BOLD_13);
             g.setColor(theme.levelNotice);
             String title = "体型榜单";
             FontMetrics fm = g.getFontMetrics();
@@ -602,7 +620,7 @@ public class SnakeRenderer {
                 if (currentPlayerEntry != null) {
                     showSingleEntry(g, startY, 1, currentPlayerEntry, playerName, true);
                 } else {
-                    g.setFont(new Font("SansSerif", Font.PLAIN, 10));
+                    g.setFont(FONT_PLAIN_10);
                     g.setColor(theme.mutedText);
                     String empty = "暂无纪录，开始第一局吧！";
                     fm = g.getFontMetrics();
@@ -641,7 +659,7 @@ public class SnakeRenderer {
                         String line = prefix + currentPlayerEntry.name()
                                 + "  长度 " + currentPlayerEntry.bestLength()
                                 + "  分数 " + currentPlayerEntry.bestScore();
-                        g.setFont(new Font("SansSerif", Font.BOLD, 11));
+                        g.setFont(FONT_BOLD_11);
                         g.setColor(theme.text);
                         fm = g.getFontMetrics();
                         g.drawString(line, (width - fm.stringWidth(line)) / 2, startY + 23 * row);
@@ -655,7 +673,7 @@ public class SnakeRenderer {
                                   LeaderboardStore.Entry entry, String playerName, boolean isCurrent) {
         String line = row + ". " + entry.name() + "  长度 " + entry.bestLength()
                 + "  分数 " + entry.bestScore();
-        g.setFont(new Font("SansSerif", isCurrent ? Font.BOLD : Font.PLAIN, 11));
+        g.setFont(isCurrent ? FONT_BOLD_11 : FONT_PLAIN_11);
         g.setColor(isCurrent ? theme.text : theme.mutedText);
         FontMetrics fm = g.getFontMetrics();
         g.drawString(line, (width - fm.stringWidth(line)) / 2, startY + 23 * row);
@@ -667,10 +685,22 @@ public class SnakeRenderer {
 
     /** 在画布水平居中位置绘制文字，yOffset 为相对于画布顶部的偏移。 */
     private void drawCenteredText(Graphics2D g, String text, Color color, int fontSize, int yOffset) {
-        g.setFont(new Font("SansSerif", Font.BOLD, fontSize));
+        g.setFont(fontForSize(fontSize));
         g.setColor(color);
         FontMetrics fm = g.getFontMetrics();
         g.drawString(text, (width - fm.stringWidth(text)) / 2, yOffset + fm.getAscent());
+    }
+
+    /** 返回缓存的加粗字体；未缓存的字号临时创建。 */
+    private static Font fontForSize(int size) {
+        return switch (size) {
+            case 26 -> FONT_BOLD_26;
+            case 16 -> FONT_BOLD_16;
+            case 13 -> FONT_BOLD_13;
+            case 12 -> FONT_BOLD_12;
+            case 11 -> FONT_BOLD_11;
+            default -> new Font("SansSerif", Font.BOLD, size);
+        };
     }
 
     /** 返回网格单元格中心点的像素坐标。 */

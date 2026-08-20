@@ -6,6 +6,7 @@ import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.LineUnavailableException;
 import javax.sound.sampled.SourceDataLine;
+import javax.swing.SwingUtilities;
 
 /**
  * 跨平台非阻塞音效，对应 Python {@code snake_audio}（winsound.Beep 的替代）。
@@ -51,7 +52,8 @@ public final class AudioBeep {
                 line.drain();
             } catch (LineUnavailableException | RuntimeException e) {
                 if (fallback != null) {
-                    fallback.bell();
+                    // 回退到 GUI 响铃，调度到 EDT 执行以保证线程安全
+                    SwingUtilities.invokeLater(fallback::bell);
                 }
             }
         }, "snake-audio");
