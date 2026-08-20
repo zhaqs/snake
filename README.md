@@ -1,13 +1,13 @@
 # Snake Game
 
-一个使用 Java Swing + Graphics2D 开发的桌面贪吃蛇游戏，支持平滑插值动画、等级成长、障碍物、道具、加速、排行榜和最高分记录。数据通过本地 MySQL 持久化，构建产物为包含驱动的可执行 fat jar，`java -jar` 即可运行。
+一个使用 Java Swing + Graphics2D 开发的桌面贪吃蛇游戏。采用「霓光夜园 / Neon Garden」深色视觉（径向渐变背景 + 玻璃质感蛇珠 + 青色发光眼），蛇以连续坐标沿 8 个方向（含斜向）移动——按住方向键才前进、松开即停。支持等级成长、障碍物、道具、多食物、排行榜和最高分记录。数据通过本地 MySQL 持久化，构建产物为包含驱动的可执行 fat jar，`java -jar` 即可运行。
 
 ## 功能
 
 ### 玩法
-- 方向键或 `WASD` 控制移动
-- 按住空格加速（移动间隔减半），松开减速
-- 游戏结束后按空格重新开始，`P` 暂停或继续，`Esc` 退出
+- 方向键或 `WASD` 控制移动；**按住才前进，松开即停止**（已取消自动前进与加速功能）
+- 同时按住两个相邻方向键可**斜向移动**（8 个方向，如 ↑+→ 走右上 45°）；两对向键同按则抵消停止
+- 空格用于开始 / 重开，`P` 暂停或继续，`Esc` 退出
 - 随分数提升等级、速度和障碍数量（每 5 分 +1 级，每级 +4 障碍）
 
 ### 道具
@@ -15,15 +15,21 @@
 - **磁铁（M）**：5 秒内将 3 格范围内的食物和道具吸向蛇头
 - 每 10 秒随机生成一个道具
 
-### 视觉效果
-- 基于移动进度（`moveProgress`）的逐帧插值，蛇身平滑滑动而非逐格跳变
-- 蛇头带眼睛、瞳孔、鼻孔和分叉舌头，朝向随移动方向变化
-- 蛇尾渐变收尖，蛇身用圆角方块 + 连接线渲染
-- 无敌状态：彩虹色闪烁 + 加粗轮廓，临近结束时闪烁警示
-- 磁铁状态：双重脉冲光环、虚线光束、流动粒子、目标高亮
+### 视觉效果（霓光夜园 / Neon Garden）
+- 径向渐变深色背景 + 柔和蓝紫网格，营造空间纵深
+- 蛇身为**玻璃珠串**：每节圆珠带左上高光，从头到尾由亮到暗渐变；蛇尾最后两颗渐小成尖
+- 蛇头为加大的圆珠 + 暗色勾边，眼睛为白底 + **青色虹膜** + 黑瞳 + 白色 catchlight，舌头为玫瑰红分叉
+- 食物为**玻璃果实**（径向渐变球 + 高光点）；同时在场的食物维持 3 个，且不在墙边一圈生成
+- 无敌状态：彩虹玻璃珠闪烁 + 金色描边，临近结束时闪烁警示
+- 磁铁状态：紫罗兰玻璃珠 + 双重脉冲光环（带霓光晕）+ 光束 + 流动粒子 + 目标高亮
 - 墙体破碎：闪光圈 + 6 条裂纹 + 6 个飞散碎片
-- 死亡动画：X 形眼睛 + 吐舌 + 能量圈扩散 + 闪烁框
+- 死亡动画：灰化蛇身 + X 形眼睛 + 吐舌 + **红色冲击波环**扩散 + 闪烁框
 - 等级提示、欢迎页排行榜（体型榜单 top 5）
+
+### 碰撞判定
+- **撞自身**：判定阈值收紧——蛇头要真正越过身体珠子的中心（`SELF_HIT_RADIUS`，小于身珠半径）才算撞，可以擦身而过
+- **撞墙**：蛇头中心越过边界线才死，蛇可贴墙滑行（头珠探出一半仍存活）
+- 无敌状态下撞自身 / 墙体不死，撞障碍则击碎
 
 ### 音效
 - `javax.sound.sampled` 合成方波，无需外部音频文件
@@ -87,13 +93,13 @@ java -jar target/snake-game-1.0.0.jar
 
 ```text
 src/main/java/snake/
-├── SnakeGame.java              # 游戏入口、Swing 界面、游戏循环、键盘输入、所有玩法逻辑
+├── SnakeGame.java              # 游戏入口、Swing 界面、连续移动游戏循环、方向键状态、所有玩法逻辑
 ├── audio/
 │   └── AudioBeep.java          # javax.sound 方波合成音效
 ├── constants/
 │   └── GameConfig.java         # 游戏常量 + Theme 配色（java.awt.Color）
 ├── input/
-│   └── DirectionInput.java     # 按键到方向的映射
+│   └── DirectionInput.java     # 按键到方向的映射（8方向版改用直接跟踪，此模块保留未用）
 ├── model/
 │   ├── Point.java              # 不可变网格坐标（record）
 │   ├── PowerUp.java            # 道具
@@ -101,9 +107,9 @@ src/main/java/snake/
 │   └── WallBreakEffect.java   # 墙体破碎特效
 ├── render/
 │   ├── SnakeRenderer.java     # Graphics2D 全部绘制（对应 Python snake_renderer）
-│   └── PositionProvider.java  # 渲染器拉取插值坐标的回调接口
+│   └── PositionProvider.java  # 渲染器拉取连续坐标（珠串 + 航向）的回调接口
 ├── rules/
-│   └── SnakeRules.java        # 纯函数：方向相反、碰撞致命、边界、曼哈顿距离
+│   └── SnakeRules.java        # 纯函数：方向相反、边界、曼哈顿距离（部分 8方向版不再调用）
 ├── state/
 │   └── GameState.java         # 可变运行时状态
 └── storage/
@@ -112,9 +118,9 @@ src/main/java/snake/
 
 ## 架构
 
-- **渲染解耦**：`SnakeGame` 实现 `PositionProvider` 接口向 `SnakeRenderer` 提供插值坐标，渲染器不依赖 GUI 控件，可独立测试。
-- **游戏循环**：`javax.swing.Timer(16ms)` 驱动 `tick()`，基于 `System.nanoTime()` 单调时钟计算移动进度，到点触发 `moveOneCell()`。
-- **状态隔离**：`GameState` 持有全部可变状态，`SnakeRules` 是无状态纯函数，`GameConfig` 是静态常量。
+- **渲染解耦**：`SnakeGame` 实现 `PositionProvider` 接口向 `SnakeRenderer` 提供连续像素坐标（珠串 `bodyPoints` + 航向 `heading`），渲染器不依赖 GUI 控件，可独立测试。
+- **游戏循环**：`javax.swing.Timer(16ms)` 驱动 `tick()`，按真实 `dt` 前进（连续坐标）；方向由四方向键状态合成归一化向量得到（支持斜向），`stepMovement()` 完成头位移 → 身体等距跟随 → 碰撞 / 拾取。
+- **状态隔离**：`GameState` 持有全部可变状态（蛇身珠串、航向、方向向量、食物 / 道具 / 障碍等），`SnakeRules` 是无状态纯函数，`GameConfig` 是静态常量。
 - **降级容错**：`LeaderboardStore` 在 JDBC 不可用时退化为内存 `HashMap`，保证游戏可玩性。
 
 ## 验证
